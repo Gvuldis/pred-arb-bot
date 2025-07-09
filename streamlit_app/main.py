@@ -226,10 +226,6 @@ if st.button("Check Arbitrage"):
                 "ROI":             f"{roi*100:.2f}%"
             })
 
-        # optional: show full payoff table
-        if st.checkbox(f"Details for {b_id}", key=b_id):
-            st.dataframe(df_table)
-
     # render results
     if summaries:
         st.table(pd.DataFrame(summaries))
