@@ -31,8 +31,29 @@ def init_db():
       poly_condition_id  TEXT,
       PRIMARY KEY (bodega_id, poly_condition_id)
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS new_bodega_markets (
+      market_id    TEXT PRIMARY KEY,
+      market_name  TEXT,
+      deadline     INTEGER,
+      first_seen   INTEGER
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ignored_bodega_markets (
+      market_id    TEXT PRIMARY KEY,
+      ignored_at   INTEGER
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS suggested_matches (
+      bodega_id          TEXT,
+      poly_id            TEXT,
+      score              REAL,
+      first_suggested    INTEGER,
+      PRIMARY KEY (bodega_id, poly_id)
+    )""")
     conn.commit()
     conn.close()
+
 
 
 def save_bodega_markets(markets: list):
@@ -69,6 +90,43 @@ def load_polymarkets() -> list:
     rows = cur.fetchall(); conn.close()
     return [dict(r) for r in rows]
 
+def load_new_bodega_markets() -> list[dict]:
+    """Return all unprocessed Bodega markets."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM new_bodega_markets")
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def add_new_bodega_market(m: dict):
+    """Insert a newly seen market into the holding table."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur.execute("""
+      INSERT OR IGNORE INTO new_bodega_markets
+      (market_id, market_name, deadline, first_seen)
+      VALUES (?,?,?,?)
+    """, (m["id"], m["name"], m["deadline"], int(time.time())))
+    conn.commit()
+    conn.close()
+
+def remove_new_bodega_market(market_id: str):
+    """Delete from the holding table once processed."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur.execute("DELETE FROM new_bodega_markets WHERE market_id=?", (market_id,))
+    conn.commit()
+    conn.close()
+
+def ignore_bodega_market(market_id: str):
+    """Mark a holding‐table market as ignored and remove it."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur.execute("""
+      INSERT OR IGNORE INTO ignored_bodega_markets
+      (market_id, ignored_at) VALUES (?,?)
+    """, (market_id, int(time.time())))
+    cur.execute("DELETE FROM new_bodega_markets WHERE market_id=?", (market_id,))
+    conn.commit()
+    conn.close()
 def save_manual_pair(bodega_id: str, poly_id: str):
     conn = get_conn(); cur = conn.cursor()
     cur.execute("""
@@ -82,4 +140,29 @@ def load_manual_pairs() -> list[tuple]:
     cur.execute("SELECT bodega_id, poly_condition_id FROM manual_pairs")
     rows = cur.fetchall(); conn.close()
     return [(r["bodega_id"], r["poly_condition_id"]) for r in rows]
+def load_suggested_matches() -> list[dict]:
+    """Return all unmatched fuzzy suggestions."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur.execute("SELECT * FROM suggested_matches")
+    rows = cur.fetchall(); conn.close()
+    return [dict(r) for r in rows]
+
+def add_suggested_match(bodega_id: str, poly_id: str, score: float):
+    """Insert a new fuzzy-match suggestion if not already present."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur.execute("""
+      INSERT OR IGNORE INTO suggested_matches
+      (bodega_id, poly_id, score, first_suggested)
+      VALUES (?,?,?,?)
+    """, (bodega_id, poly_id, score, int(time.time())))
+    conn.commit(); conn.close()
+
+def remove_suggested_match(bodega_id: str, poly_id: str):
+    """Remove a suggestion after approval or decline."""
+    conn, cur = get_conn(), get_conn().cursor()
+    cur.execute("""
+      DELETE FROM suggested_matches
+      WHERE bodega_id=? AND poly_id=?
+    """, (bodega_id, poly_id))
+    conn.commit(); conn.close()
 

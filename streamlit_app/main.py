@@ -22,7 +22,12 @@ from streamlit_app.db import (
     save_bodega_markets,
     save_polymarkets,
     save_manual_pair,
-    load_manual_pairs
+    load_manual_pairs,
+    load_new_bodega_markets,
+    remove_new_bodega_market,
+    ignore_bodega_market,
+    load_suggested_matches,
+    remove_suggested_match
 )
 # Matching logic
 from matching.fuzzy import (
@@ -38,7 +43,8 @@ init_db()
 BODEGA_API = "https://testnet.bodegamarket.io/api"
 POLY_API   = "https://clob.polymarket.com"
 COIN_API   = "https://api.coingecko.com/api/v3/simple/price?ids=cardano&vs_currencies=usd"
-WEBHOOK    = os.getenv("DISCORD_WEBHOOK_URL", "")
+WEBHOOK    = "https://discord.com/api/webhooks/1255893289136160869/ZwX3Qo1JsF_fBD0kdmI8-xaEyvah9TnAV_R7dIHIKdBAwpEvj6VgmP3YcOa7j8zpyAPN"
+
 
 b_client  = BodegaClient(BODEGA_API)
 p_client  = PolymarketClient(POLY_API)
@@ -85,8 +91,46 @@ with col3:
 manual_pairs = load_manual_pairs()
 if manual_pairs:
     st.markdown("**Saved Manual Pairs:**")
-    for b,p in manual_pairs:
-        st.write(f"• Bodega {b} ↔ Polymarket {p}")
+    for b_id, p_id in manual_pairs:
+    # Bodega link (testnet)
+        b_url = f"https://testnet.bodegamarket.io/marketDetails?id={b_id}"
+    # Polymarket link (main site)
+
+        st.markdown(
+            f"• [Bodega {b_id}]({b_url})  ↔  [Polymarket {p_id}]",
+            unsafe_allow_html=True
+        )
+st.markdown("---")
+# —–– Pending New Bodega Markets —–––––––––––––––––––––
+st.subheader("🆕 Pending New Bodega Markets")
+pending = load_new_bodega_markets()
+if not pending:
+    st.info("No new Bodega markets awaiting processing.")
+else:
+    for m in pending:
+        st.markdown(f"**{m['market_name']}**  –  Deadline: <t:{m['deadline']}:f>", unsafe_allow_html=True)
+        cols = st.columns([3,2,2])
+        # Input for Polymarket ID
+        with cols[0]:
+            poly_input = st.text_input(
+                "Polymarket ID", key=f"polyid_{m['market_id']}"
+            )
+        # Match button
+        with cols[1]:
+            if st.button("Match", key=f"match_{m['market_id']}"):
+                if poly_input:
+                    save_manual_pair(m["market_id"], poly_input)
+                    remove_new_bodega_market(m["market_id"])
+                    st.success(f"Matched Bodega {m['market_name']} ↔ {poly_input}")
+                    st.experimental_rerun()
+                else:
+                    st.error("Enter a Polymarket condition ID before matching.")
+        # Ignore button
+        with cols[2]:
+            if st.button("Ignore", key=f"ignore_{m['market_id']}"):
+                ignore_bodega_market(m["market_id"])
+                st.warning(f"Ignored Bodega {m['market_name']}")
+                st.experimental_rerun()
 
 st.markdown("---")
 
@@ -97,7 +141,34 @@ if st.button("Run Auto-Match"):
     polys = get_all_polymarkets()
     matches, ignored = fuzzy_match_markets(bodes, polys)
     st.success(f"Auto-match done: {len(matches)} matches, {len(ignored)} ignored.")
+    notifier.notify_auto_match(len(matches), len(ignored))
 
+
+st.subheader("🔍 Suggested Matches")
+suggested = load_suggested_matches()
+if not suggested:
+    st.info("No fuzzy-match suggestions at this time.")
+else:
+    for s in suggested:
+        # fetch display names from main tables
+        b = next((m for m in get_all_bodegas() if m["id"] == s["bodega_id"]), {})
+        p = next((m for m in get_all_polymarkets() if m["condition_id"] == s["poly_id"]), {})
+        score = s["score"]
+
+        st.markdown(f"**Bodega:** {b.get('name','?')}\n\n**Polymarket:** {p.get('question','?')}\n\nScore: {score:.1f}")
+        cols = st.columns([2,2])
+        with cols[0]:
+            if st.button("Approve", key=f"approve_{s['bodega_id']}"):
+                save_manual_pair(s["bodega_id"], s["poly_id"])
+                remove_suggested_match(s["bodega_id"], s["poly_id"])
+                st.success("✅ Match approved")
+                st.experimental_rerun()
+        with cols[1]:
+            if st.button("Decline", key=f"decline_{s['bodega_id']}"):
+                remove_suggested_match(s["bodega_id"], s["poly_id"])
+                st.warning("🚫 Match declined")
+                st.experimental_rerun()
+st.markdown("---")
 # 🚀 Check Arbitrage
 st.subheader("🚀 Check Arbitrage")
 if st.button("Check Arbitrage"):
@@ -142,6 +213,8 @@ if st.button("Check Arbitrage"):
 
         # — Only show if profitable —
         if profit > -1000000 and roi > -1000.015:
+            notifier.notify_arb_opportunity(question, x_star, profit, roi)
+
             summaries.append({
                 "Pair":            f"{pool['name']} ↔ {question}",
                 "Bodega Yes (USD)": f"${b_yes_usd:.4f}",
