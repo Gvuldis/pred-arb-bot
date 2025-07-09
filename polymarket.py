@@ -1,95 +1,134 @@
 import math
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.special import logsumexp
 
-def q_values_from_price(p_yes: float, b: float):
-    ratio = (1 - p_yes) / p_yes
-    delta_q = b * math.log(ratio)
-    q_yes = 0
-    q_no = delta_q
-    return q_yes, q_no
+# ---------- MODEL CONSTANTS ----------
+FEE_RATE    = 0.02       # 2% fee on Bodega trades
+B           = 3000       # LMSR liquidity parameter
+Q_YES       = 17_500     # YES pool size on Bodega
+Q_NO        = 23_500     # NO  pool size on Bodega
+P_POLY_YES  = 0.20       # YES price on Polymarket (USD)
+P_POLY_NO   = 1 - P_POLY_YES
+ADA_TO_USD  = 0.6        # 1 ADA = 0.6 USD
 
-def lmsr_cost(q_yes: float, q_no: float, b: float) -> float:
-    return b * math.log(math.exp(q_yes / b) + math.exp(q_no / b))
+# ---------- CORE FUNCTIONS ----------
+import math
 
-def cost_to_buy_yes(q_yes: float, q_no: float, b: float, y: float) -> float:
-    return lmsr_cost(q_yes + y, q_no, b) - lmsr_cost(q_yes, q_no, b)
+def compute_price(q_yes, q_no, b=B):
+    e_yes = math.exp(q_yes/b)
+    e_no  = math.exp(q_no/b)
+    return e_yes/(e_yes+e_no)
 
-def compute_max_total_wager(p_yes_lmsr, p_yes_const, b):
-    q_yes, q_no = q_values_from_price(p_yes_lmsr, b)
-    k = p_yes_const / (1 - p_yes_const)
+def lmsr_cost(q_yes, q_no, b=B):
+    return b * logsumexp([q_yes/b, q_no/b])
 
-    max_profit = 0
-    max_x = 0
-    best_y = 0
+def lmsr_cost_vector(q_yes, q_no, x_vals, b=B):
+    arr = np.vstack([
+        (q_yes + x_vals)/b,
+        np.full_like(x_vals, q_no/b)
+    ])
+    return b * logsumexp(arr, axis=0)
 
-    for y in np.linspace(1, 40000, 500):
-        delta_c = cost_to_buy_yes(q_yes, q_no, b, y)
-        x = y + (y - delta_c) * (1 - p_yes_const) / p_yes_const
-        profit_yes = y - delta_c
-        profit_no = (x - y) * (1 / (1 - p_yes_const)) - (x - y)
-        profit = min(profit_yes, profit_no)
-        if profit >= 0 and x > max_x:
-            max_x = x
-            max_profit = profit
-            best_y = y
+# ---------- PRE-TRADE STATE ----------
+p0    = compute_price(Q_YES, Q_NO)
+swap  = (P_POLY_YES < p0)
+if swap:
+    buy_poly_price = P_POLY_YES
+    p_ext          = P_POLY_NO
+    q_yes, q_no    = Q_NO, Q_YES
+else:
+    buy_poly_price = P_POLY_NO
+    p_ext          = P_POLY_YES
+    q_yes, q_no    = Q_YES, Q_NO
 
-    return max_x, max_profit, best_y
+# baseline cost offset
+cost0 = lmsr_cost(q_yes, q_no)
 
-def compute_arbitrage_profit(x, p_yes_lmsr, p_yes_const, b):
-    q_yes, q_no = q_values_from_price(p_yes_lmsr, b)
-    k = p_yes_const / (1 - p_yes_const)
+# ---------- ANALYTIC OPTIMUM ----------
+def optimal_x_with_fee(q_yes, q_no, p_ext, fee=FEE_RATE, b=B):
+    p_eff = p_ext/(1+fee)
+    if not 0 < p_eff < 1:
+        return None
+    e_yes = math.exp(q_yes/b)
+    e_no  = math.exp(q_no/b)
+    y = (p_eff*e_no)/((1-p_eff)*e_yes)
+    return None if y<=0 else b*math.log(y)
 
-    def delta_C(y):
-        return cost_to_buy_yes(q_yes, q_no, b, y)
+x_star = optimal_x_with_fee(q_yes, q_no, p_ext)
 
-    y = (k * x + delta_C(0)) / (1 + k)
-    for _ in range(5):
-        dC = delta_C(y)
-        y = (k * x + dC) / (1 + k)
+# ---------- GRID UP TO x* ----------
+increments = list(np.arange(0, math.ceil(x_star/100)*100+1, 100))
+if not np.isclose(increments[-1], x_star):
+    increments.append(x_star)
+x_vals = np.array(sorted(set(increments)))
 
-    dC = delta_C(y)
-    profit_yes = y - dC
-    profit_no = (x - y) * (1 / (1 - p_yes_const)) - (x - y)
-    profit = min(profit_yes, profit_no)
-    margin = profit / x if x > 0 else 0
-    return profit, margin
+# ---------- COMPUTE METRICS ----------
+raw_bod    = lmsr_cost_vector(q_yes, q_no, x_vals) - cost0    # USD before fee
+fee_usd    = raw_bod * FEE_RATE                                # USD fee
+bod_usd    = raw_bod + fee_usd                                 # USD after fee
+poly_usd   = x_vals * buy_poly_price                           # Polymarket USD spend
 
-# Parameters
-b = 3000
-p_yes_lmsr = 0.268941
-p_yes_const = 0.35
+total_usd  = bod_usd + poly_usd
+rev_usd    = x_vals
+profit_usd = rev_usd - total_usd
 
-x_vals = np.linspace(100, 50000, 300)
-profits = []
-margins = []
+# suppress divide warnings and apply safe formulas
+with np.errstate(divide='ignore', invalid='ignore'):
+    margin         = np.where(total_usd>0, profit_usd/total_usd, np.nan)
+    avg_bod_price  = np.where(x_vals>0, bod_usd/x_vals, np.nan)
+    avg_poly_price = np.where(x_vals>0, poly_usd/x_vals, np.nan)
+    bod_ada_post   = bod_usd/ADA_TO_USD
+    bod_ada_pre    = raw_bod/ADA_TO_USD
 
-for x in x_vals:
-    profit, margin = compute_arbitrage_profit(x, p_yes_lmsr, p_yes_const, b)
-    profits.append(profit)
-    margins.append(margin)
+# ---------- OPTIMUM SUMMARY ----------
+opt_idx = np.where(np.isclose(x_vals, x_star))[0][0]
+print("=== OPTIMUM SUMMARY ===")
+print(f"x* (nr_of_shares)    = {x_star:.6f}")
+print(f"TotalCost_USD        = {total_usd[opt_idx]:.6f}")
+print(f"PolyCost_USD         = {poly_usd[opt_idx]:.6f}")
+print(f"BodCost_ADA (post)   = {bod_ada_post[opt_idx]:.6f}")
+print(f"Profit_USD           = {profit_usd[opt_idx]:.6f}")
+print(f"Margin               = {margin[opt_idx]:.6f}")
+print("=======================\n")
 
-max_x, max_profit, best_y = compute_max_total_wager(p_yes_lmsr, p_yes_const, b)
+# ---------- RESULT TABLE ----------
+df = pd.DataFrame({
+    'nr_of_shares':       x_vals,
+    'Poly_USD_cost':      poly_usd,
+    'Bod_ADA_cost':  bod_ada_pre,
+    'Bod_USD_cost':  raw_bod,
+    'TotalCost_USD':      total_usd,
+    'Fee_USD':            fee_usd,
+    'AvgPrice_Poly_USD':  avg_poly_price,
+    'AvgPrice_Bod_USD':   avg_bod_price,
+    'Profit_USD':         profit_usd,
+    'Margin':             margin
+})
 
-# Plotting
-plt.figure()
-plt.plot(x_vals, profits, color='orange')
-plt.axvline(x=max_x, linestyle='--', color='green', label=f'Max Wager ≈ {max_x:.0f}')
-plt.title("Profit vs Total Wager")
-plt.xlabel("Total Wager (x)")
-plt.ylabel("Profit")
-plt.legend()
-plt.grid(True)
+# move optimum row to top
+star = df.iloc[[opt_idx]]
+rest = df.drop(opt_idx).reset_index(drop=True)
+df = pd.concat([star, rest], ignore_index=True)
+
+print(df.to_string(index=False, float_format="{:,.6f}".format))
+
+# ---------- VISUALISATION ----------
+plt.close('all')
+fig, ax1 = plt.subplots()
+ax1.plot(x_vals, margin, label='Margin')
+ax1.set_xlabel('nr_of_shares')
+ax1.set_ylabel('Margin')
+ax2 = ax1.twinx()
+ax2.plot(x_vals, profit_usd, label='Profit_USD', color='tab:orange')
+ax2.set_ylabel('Profit_USD')
+if x_star is not None:
+    ax1.axvline(x_star, linestyle='--', color='red', label='x*')
+
+# combined legend
+lines, labels = ax1.get_legend_handles_labels()
+l2, l2l = ax2.get_legend_handles_labels()
+ax1.legend(lines + l2, labels + l2l, loc='upper left')
+plt.title('Arbitrage Profit & Margin vs nr_of_shares')
 plt.show()
-
-plt.figure()
-plt.plot(x_vals, margins, color='orange')
-plt.axvline(x=max_x, linestyle='--', color='green', label='Max Wager')
-plt.title("Profit Margin vs Total Wager")
-plt.xlabel("Total Wager (x)")
-plt.ylabel("Profit Margin")
-plt.legend()
-plt.grid(True)
-plt.show()
-
-max_x, max_profit, best_y

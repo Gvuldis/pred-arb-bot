@@ -1,86 +1,140 @@
 # matching/fuzzy.py
 
-import requests
-import csv
+"""
+Hybrid fuzzy matching and market fetchers for Bodega vs Polymarket.
+This version returns matches/ignored without writing to CSV.
+"""
 import time
-import pandas as pd
-from difflib import SequenceMatcher
-from rapidfuzz.fuzz import token_sort_ratio
+import requests
+from rapidfuzz import fuzz
+from typing import List, Tuple, Dict
+from matching.keywords import FOCUS_KEYWORDS
 from datetime import datetime
 
+# Configuration constants
+THRESHOLD = 85  # minimum combined score to consider a match
 now_ms = int(datetime.utcnow().timestamp() * 1000)
 
-def fetch_all_polymarket_clob_markets():
+#––– FOCUS TERM EXTRACTION –––
+
+def extract_focus_terms(text: str) -> List[str]:
+    """
+    Return any focus keyword that appears (case-insensitive) in the text.
+    """
+    text_low = text.lower()
+    return [kw for kw in FOCUS_KEYWORDS if kw.lower() in text_low]
+
+#––– HYBRID MATCHING –––
+
+def match_markets(
+    bodega_name: str,
+    poly_name: str,
+    keyword_bonus: int = 20
+) -> Tuple[bool, Dict[str, float]]:
+    """
+    Compare two market titles, applying keyword bonus and fuzzy similarity.
+    Returns (matched, details).
+    """
+    # 1) Keyword bonus
+    b_terms = extract_focus_terms(bodega_name)
+    p_terms = extract_focus_terms(poly_name)
+    shared = list(set(b_terms) & set(p_terms))
+    bonus = keyword_bonus if shared else 0
+
+    # 2) Fuzzy scores
+    scr_partial = fuzz.partial_ratio(bodega_name, poly_name)
+    scr_token = fuzz.token_sort_ratio(bodega_name, poly_name)
+    score = max(scr_partial, scr_token) + bonus
+
+    # 3) Threshold check
+    matched = score >= THRESHOLD
+    details = {
+        "score": float(score),
+        "partial_ratio": float(scr_partial),
+        "token_sort_ratio": float(scr_token),
+        "keyword_bonus": bonus,
+        "shared_terms": shared
+    }
+    return matched, details
+
+#––– POLYMARKET FETCHER –––
+
+def fetch_all_polymarket_clob_markets(
+    max_retries: int = 4,
+    backoff_factor: float = 0.5
+) -> List[Dict]:
+    """
+    Retrieve all active Polymarket CLOB markets with retry/backoff.
+    """
     base_url = "https://clob.polymarket.com/markets"
-    all_markets = []
+    results = []
     cursor = ""
+
     while True:
         url = base_url + (f"?next_cursor={cursor}" if cursor else "")
-        resp = requests.get(url)
-        resp.raise_for_status()
-        result = resp.json()
-        all_markets.extend(result['data'])
-        cursor = result.get('next_cursor')
+        for attempt in range(max_retries):
+            resp = requests.get(url)
+            if resp.status_code == 429:
+                time.sleep(backoff_factor * (2 ** attempt))
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            break
+        data = resp.json().get("data", [])
+        results.extend(data)
+        cursor = resp.json().get("next_cursor")
         if not cursor or cursor == "LTE=":
             break
-    # Only those that are actually tradable
-    return [m for m in all_markets if m.get("active") and not m.get("closed")]
+        time.sleep(0.2)
+    return [m for m in results if m.get("active") and not m.get("closed")]
 
+#––– BODEGA FETCHER –––
 
-def fetch_bodega_v3_active_markets():
-    url = "https://testnet.bodegamarket.io/api/getMarketConfigs"
-    r = requests.post(url, json={}); r.raise_for_status()
-    data = r.json()["marketConfigs"]
-    markets = []
-    for m in data:
-        if m["status"] != "Active":
+def fetch_bodega_v3_active_markets(api_url: str) -> List[Dict]:
+    """
+    Retrieve active Bodega V3 markets via POST /getMarketConfigs.
+    """
+    url = f"{api_url}/getMarketConfigs"
+    resp = requests.post(url, json={})
+    resp.raise_for_status()
+    configs = resp.json().get("marketConfigs", [])
+
+    active = []
+    for m in configs:
+        if m.get("status") != "Active":
             continue
         dl = m.get("deadline")
         if not dl or not str(dl).isdigit() or int(dl) < now_ms:
             continue
-        markets.append({
+        active.append({
             "id": m["id"],
             "name": m["name"],
-            "deadline": m["deadline"],
-            "options": m.get("options", []),
+            "deadline": dl,
+            "options": m.get("options", [])
         })
-    return markets
+    return active
 
-def fuzzy_match_markets(bodega_markets, poly_markets, min_similarity=75):
-    matches = []
-    used_poly = set()
+#––– FULL AUTO-MATCH –––
+
+def fuzzy_match_markets(
+    bodega_markets: List[Dict],
+    poly_markets: List[Dict]
+) -> Tuple[List[Tuple[Dict, Dict, float]], List[Tuple[str, str, str]]]:
+    """
+    Auto-match Bodega vs Polymarket markets.
+    Returns two lists:
+      - matches: [(bodega_market, poly_market, score), ...]
+      - ignored: [(bodega_id, poly_condition_id, reason), ...]
+    """
+    matches, ignored = [], []
+
     for b in bodega_markets:
-        best_sim, best_p = 0, None
         for p in poly_markets:
-            if p['condition_id'] in used_poly:
-                continue
-            sim = token_sort_ratio(b['name'], p['question'])
-            if sim > best_sim:
-                best_sim, best_p = sim, p
-        if best_p and best_sim >= min_similarity:
-            matches.append((b, best_p, best_sim/100))
-            used_poly.add(best_p['condition_id'])
-    return matches
+            ok, det = match_markets(b.get("name", ""), p.get("question", ""))
+            if ok:
+                matches.append((b, p, det["score"]))
+            else:
+                ignored.append((b.get("id"), p.get("condition_id"), "score<threshold"))
 
-def export_matches_to_csv(matches, filename="MATCHED_MARKETS.csv", ignorefile="IGNORED_MATCHES.csv"):
-    # same as before...
-    import pandas as pd
-    new_pairs = set((b['id'], p['condition_id']) for b,p,_ in matches)
-    try:
-        existing = pd.read_csv(filename)
-        existing_pairs = set(zip(existing.bodega_id, existing.poly_condition_id))
-    except:
-        existing_pairs = set()
-    try:
-        ignored = pd.read_csv(ignorefile)
-        ignored_pairs = set(zip(ignored.bodega_id, ignored.poly_condition_id))
-    except:
-        ignored_pairs = set()
-    to_add = new_pairs - ignored_pairs
-    combined = existing_pairs | to_add
-    import csv
-    with open(filename, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["bodega_id","poly_condition_id"])
-        for b_id,p_id in sorted(combined):
-            w.writerow([b_id,p_id])
+    return matches, ignored

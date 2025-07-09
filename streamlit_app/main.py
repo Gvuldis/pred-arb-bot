@@ -1,9 +1,10 @@
 # streamlit_app/main.py
+
 import sys, pathlib
+# Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
 
 import os
 import pandas as pd
@@ -13,120 +14,151 @@ from services.bodega.client import BodegaClient
 from services.polymarket.client import PolymarketClient
 from services.fx.client import FXClient
 from notifications.discord import DiscordNotifier
-from matching.fuzzy import fuzzy_match_markets, export_matches_to_csv
+from services.polymarket.model import build_arbitrage_table
 
-# —–– CONFIG —–––––––––––––––––––––––––
+# Database helpers
+from streamlit_app.db import (
+    init_db,
+    save_bodega_markets,
+    save_polymarkets,
+    save_manual_pair,
+    load_manual_pairs
+)
+# Matching logic
+from matching.fuzzy import (
+    fetch_all_polymarket_clob_markets,
+    fetch_bodega_v3_active_markets,
+    fuzzy_match_markets
+)
+
+# Initialize database
+init_db()
+
+# —–– CONFIG & CLIENTS —––––––––––––––––––––––––
 BODEGA_API = "https://testnet.bodegamarket.io/api"
 POLY_API   = "https://clob.polymarket.com"
 COIN_API   = "https://api.coingecko.com/api/v3/simple/price?ids=cardano&vs_currencies=usd"
-WEBHOOK    = "https://discord.com/api/webhooks/1255893289136160869/ZwX3Qo1JsF_fBD0kdmI8-xaEyvah9TnAV_R7dIHIKdBAwpEvj6VgmP3YcOa7j8zpyAPN"
+WEBHOOK    = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-CSV_DIR     = os.path.join(os.path.dirname(__file__), "..", "csv")
-MATCHED_CSV = os.path.join(CSV_DIR, "MATCHED_MARKETS.csv")
-IGNORED_CSV = os.path.join(CSV_DIR, "IGNORED_MATCHES.csv")
-
-# —–– CLIENTS —––––––––––––––––––––––––
-b_client = BodegaClient(BODEGA_API)
-p_client = PolymarketClient(POLY_API)
+b_client  = BodegaClient(BODEGA_API)
+p_client  = PolymarketClient(POLY_API)
 fx_client = FXClient(COIN_API)
-notifier = DiscordNotifier(WEBHOOK)
+notifier  = DiscordNotifier(WEBHOOK)
 
-# —–– UTILS —–––––––––––––––––––––––––
-@st.cache_data
-def load_df(path):
-    try: return pd.read_csv(path, dtype=str)
-    except: return pd.DataFrame(columns=["bodega_id","poly_condition_id"])
-
-def save_df(df, path):
-    df.to_csv(path, index=False)
-@st.cache_data(ttl=300)               # cache for 5 minutes
-def get_all_bodegas() -> list:
-    return b_client.fetch_markets()
+# —–– CACHING —–––––––––––––––––––––––––––––––––
+@st.cache_data(ttl=300)
+def get_all_bodegas():
+    markets = fetch_bodega_v3_active_markets(BODEGA_API)
+    save_bodega_markets(markets)
+    return markets
 
 @st.cache_data(ttl=300)
-def get_all_polymarkets() -> list:
-    return p_client.fetch_all_markets()
-# —–– UI —––––––––––––––––––––––––––––
+def get_all_polymarkets():
+    markets = fetch_all_polymarket_clob_markets()
+    save_polymarkets(markets)
+    return markets
+
+# —–– UI —––––––––––––––––––––––––––––––––––––––
 st.set_page_config(layout="wide")
 st.title("🌉 Arb-Bot Dashboard")
 
-# 1) Manual Matches
-df_matched = load_df(MATCHED_CSV)
-df_ignored = load_df(IGNORED_CSV)
-
+# Manual addition
 st.subheader("➕ Add Manual Pair")
-c1,c2,c3 = st.columns([4,4,2])
-with c1: bid = st.text_input("Bodega ID")
-with c2: pid = st.text_input("Polymarket ID")
-with c3:
-    if st.button("Add"):
-        if bid and pid and not ((df_matched.bodega_id==bid)&(df_matched.poly_condition_id==pid)).any():
-            df_matched = pd.concat([df_matched, pd.DataFrame([[bid,pid]],columns=df_matched.columns)])
-            save_df(df_matched, MATCHED_CSV)
-            st.success("Added!")
+col1, col2, col3 = st.columns([3,3,2])
+with col1:
+    bid = st.text_input("Bodega ID")
+with col2:
+    search = st.text_input("Search Polymarket")
+    pm_results = p_client.search_markets(search) if search else []
+    options = {f'{m["question"]} ({m["condition_id"]})': m["condition_id"] for m in pm_results}
+    pid_label = st.selectbox("Pick Polymarket market", [""] + list(options.keys()))
+    pid = options.get(pid_label, "")
+with col3:
+    if st.button("Add Pair"):
+        if bid and pid:
+            save_manual_pair(bid, pid)
+            st.success("Pair added to DB!")
+        else:
+            st.warning("Please enter both Bodega ID and select a Polymarket market.")
+
+# Show existing manual pairs
+manual_pairs = load_manual_pairs()
+if manual_pairs:
+    st.markdown("**Saved Manual Pairs:**")
+    for b,p in manual_pairs:
+        st.write(f"• Bodega {b} ↔ Polymarket {p}")
 
 st.markdown("---")
 
-# 2) Auto-match
-with st.form("auto_match"):
-    st.write("### Auto-Match Markets")
-    threshold = st.slider("Min similarity", 50, 100, 75)
-    go = st.form_submit_button("Run Auto-Match")
-    if go:
-        bodes = b_client.fetch_markets()
-        polys = p_client.fetch_all_markets()
-        new   = fuzzy_match_markets(bodes, polys, min_similarity=threshold)
-        export_matches_to_csv(new, MATCHED_CSV, IGNORED_CSV)
-        st.success("Saved CSV with matches ✅")
+# Auto-match section
+st.subheader("🔄 Auto-Match Markets")
+if st.button("Run Auto-Match"):
+    bodes = get_all_bodegas()
+    polys = get_all_polymarkets()
+    matches, ignored = fuzzy_match_markets(bodes, polys)
+    st.success(f"Auto-match done: {len(matches)} matches, {len(ignored)} ignored.")
 
-st.markdown("---")
-
-# 3) Run Arb-check
+# 🚀 Check Arbitrage
 st.subheader("🚀 Check Arbitrage")
-fees = {"bodega":0.02,"polymarket":0.01}
-thresholds = {"min_profit":0.01,"roi":0.015}
-ada_usd = fx_client.get_ada_usd()
+if st.button("Check Arbitrage"):
+    ada_usd      = fx_client.get_ada_usd()
+    manual_pairs = load_manual_pairs()
+    summaries    = []
 
-# fetch live markets
-bodes = b_client.fetch_markets()
-polys = {m["condition_id"]:m for m in p_client.fetch_all_markets()}
+    from services.polymarket.model import build_arbitrage_table
 
-results = []
-for _,row in df_matched.iterrows():
-    bmk = next((m for m in bodes if m["id"]==row.bodega_id), None)
-    pmk = p_client.fetch_market(row.poly_condition_id)
-    if not bmk or not pmk: continue
+    for b_id, p_id in manual_pairs:
+        # — Fetch Bodega pool config & prices —
+        pool     = b_client.fetch_market_config(b_id)
+        opts     = pool['options']
+        Q_YES = next((o['shares'] for o in opts if o.get('side') == "YES"), 0)
+        Q_NO  = next((o['shares'] for o in opts if o.get('side') == "NO"),  0)
+        prices_b = b_client.fetch_prices(b_id)
+        b_yes_ada = prices_b['yesPrice_ada']
+        b_no_ada  = prices_b['noPrice_ada']
+        b_yes_usd = b_yes_ada * ada_usd
+        b_no_usd  = b_no_ada  * ada_usd
 
-    # normalize
-    norm = {
-        "bodega": {
-            "yes_usd": b_client.fetch_prices(bmk["id"])["yesPrice_ada"] * ada_usd,
-            "no_usd":  b_client.fetch_prices(bmk["id"])["noPrice_ada"]  * ada_usd,
-            "payout": ada_usd
-        },
-        "polymarket": {
-            "yes_usd": pmk["best_yes_ask"],
-            "no_usd":  pmk["best_no_ask"],
-            "payout": 1.0
-        }
-    }
+        # — Fetch Polymarket prices —
+        try:
+            poly = p_client.fetch_market(p_id)
+        except Exception:
+            continue
+        p_yes_usd = poly['best_yes_ask']
+        p_no_usd  = poly['best_no_ask']
+        question  = poly['question']
 
-    # two sides
-    for side in [("YES/no","bodega","polymarket"),("no/YES","polymarket","bodega")]:
-        buy, sell = side[1], side[2]
-        cost = norm[buy]["yes_usd"]*(1+fees[buy]) + norm[sell]["no_usd"]*(1+fees[sell])
-        profit = max(norm[buy]["payout"],norm[sell]["payout"]) - cost
-        roi    = (profit/cost) if cost else 0
-        if profit>thresholds["min_profit"] and roi>thresholds["roi"]:
-            results.append({
-                "pair": f"{bmk['name']} ↔ {pmk['question']}",
-                "side": side[0],
-                "profit": round(profit,4),
-                "roi": f"{roi*100:.2f}%"
+        # — Compute arbitrage (x*, profit, roi) —
+        x_star, summary, df_table = build_arbitrage_table(
+            Q_YES=Q_YES,
+            Q_NO =Q_NO,
+            P_POLY_YES=p_yes_usd,
+            ADA_TO_USD=ada_usd,
+            FEE_RATE=0.02,
+            B=3000,
+        )
+        profit = summary['profit_usd']
+        roi    = summary['roi']
+
+        # — Only show if profitable —
+        if profit > -1000000 and roi > -1000.015:
+            summaries.append({
+                "Pair":            f"{pool['name']} ↔ {question}",
+                "Bodega Yes (USD)": f"${b_yes_usd:.4f}",
+                "Bodega No  (USD)": f"${b_no_usd:.4f}",
+                "Poly Yes   (USD)": f"${p_yes_usd:.4f}",
+                "Poly No    (USD)": f"${p_no_usd:.4f}",
+                "x*":              f"{x_star:.2f}" if x_star else "N/A",
+                "Profit (USD)":    f"${profit:.4f}",
+                "ROI":             f"{roi*100:.2f}%"
             })
 
-df = pd.DataFrame(results)
-if df.empty:
-    st.info("No arb found right now.")
-else:
-    st.table(df)
+        # optional: show full payoff table
+        if st.checkbox(f"Details for {b_id}", key=b_id):
+            st.dataframe(df_table)
+
+    # render results
+    if summaries:
+        st.table(pd.DataFrame(summaries))
+    else:
+        st.info("No positive arbitrage opportunities found.")
