@@ -1,5 +1,6 @@
 pandas
 requests
 streamlit
-diff-lib
 rapidfuzz
+apscheduler
+python-dotenv

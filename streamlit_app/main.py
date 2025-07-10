@@ -1,19 +1,13 @@
-# streamlit_app/main.py
-
-import sys, pathlib
+import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import os
 import pandas as pd
 import streamlit as st
 
-from services.bodega.client import BodegaClient
-from services.polymarket.client import PolymarketClient
-from services.fx.client import FXClient
-from notifications.discord import DiscordNotifier
+from config import b_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE, B
 from services.polymarket.model import build_arbitrage_table
 
 # Database helpers
@@ -23,11 +17,16 @@ from streamlit_app.db import (
     save_polymarkets,
     save_manual_pair,
     load_manual_pairs,
+    delete_manual_pair,
     load_new_bodega_markets,
     remove_new_bodega_market,
     ignore_bodega_market,
+    add_suggested_match,
     load_suggested_matches,
-    remove_suggested_match
+    remove_suggested_match,
+    add_manual_bodega_market,
+    load_manual_bodega_markets,
+    delete_manual_bodega_market
 )
 # Matching logic
 from matching.fuzzy import (
@@ -39,29 +38,21 @@ from matching.fuzzy import (
 # Initialize database
 init_db()
 
-# —–– CONFIG & CLIENTS —––––––––––––––––––––––––
-BODEGA_API = "https://testnet.bodegamarket.io/api"
-POLY_API   = "https://clob.polymarket.com"
-COIN_API   = "https://api.coingecko.com/api/v3/simple/price?ids=cardano&vs_currencies=usd"
-WEBHOOK    = "https://discord.com/api/webhooks/1255893289136160869/ZwX3Qo1JsF_fBD0kdmI8-xaEyvah9TnAV_R7dIHIKdBAwpEvj6VgmP3YcOa7j8zpyAPN"
-
-
-b_client  = BodegaClient(BODEGA_API)
-p_client  = PolymarketClient(POLY_API)
-fx_client = FXClient(COIN_API)
-notifier  = DiscordNotifier(WEBHOOK)
-
 # —–– CACHING —–––––––––––––––––––––––––––––––––
 @st.cache_data(ttl=300)
 def get_all_bodegas():
     markets = fetch_bodega_v3_active_markets(BODEGA_API)
-    save_bodega_markets(markets)
+    # We only save the *real* markets, not the manual test ones
+    real_markets = [m for m in markets if not m['id'].startswith("TEST-")]
+    if real_markets:
+        save_bodega_markets(real_markets)
     return markets
 
 @st.cache_data(ttl=300)
 def get_all_polymarkets():
     markets = fetch_all_polymarket_clob_markets()
-    save_polymarkets(markets)
+    if markets:
+        save_polymarkets(markets)
     return markets
 
 # —–– UI —––––––––––––––––––––––––––––––––––––––
@@ -70,7 +61,7 @@ st.title("🌉 Arb-Bot Dashboard")
 
 # Manual addition
 st.subheader("➕ Add Manual Pair")
-col1, col2, col3 = st.columns([3,3,2])
+col1, col2, col3 = st.columns([3,3,1])
 with col1:
     bid = st.text_input("Bodega ID")
 with col2:
@@ -80,10 +71,15 @@ with col2:
     pid_label = st.selectbox("Pick Polymarket market", [""] + list(options.keys()))
     pid = options.get(pid_label, "")
 with col3:
+    st.write("") # Spacer
+    st.write("") # Spacer
     if st.button("Add Pair"):
         if bid and pid:
             save_manual_pair(bid, pid)
+            if notifier:
+                notifier.notify_manual_pair(bid, pid)
             st.success("Pair added to DB!")
+            st.rerun()
         else:
             st.warning("Please enter both Bodega ID and select a Polymarket market.")
 
@@ -92,15 +88,16 @@ manual_pairs = load_manual_pairs()
 if manual_pairs:
     st.markdown("**Saved Manual Pairs:**")
     for b_id, p_id in manual_pairs:
-    # Bodega link (testnet)
-        b_url = f"https://testnet.bodegamarket.io/marketDetails?id={b_id}"
-    # Polymarket link (main site)
+        c1, c2 = st.columns([9, 1])
+        b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
+        #polymarket url unavailable, the url works differently
+        c1.markdown(f"• [Bodega]({b_url}) `({b_id})` ↔ [Polymarket] `({p_id})`", unsafe_allow_html=True)
+        if c2.button("❌", key=f"del_pair_{b_id}_{p_id}", help="Delete this pair"):
+            delete_manual_pair(b_id, p_id)
+            st.rerun()
 
-        st.markdown(
-            f"• [Bodega {b_id}]({b_url})  ↔  [Polymarket {p_id}]",
-            unsafe_allow_html=True
-        )
 st.markdown("---")
+
 # —–– Pending New Bodega Markets —–––––––––––––––––––––
 st.subheader("🆕 Pending New Bodega Markets")
 pending = load_new_bodega_markets()
@@ -108,41 +105,50 @@ if not pending:
     st.info("No new Bodega markets awaiting processing.")
 else:
     for m in pending:
-        st.markdown(f"**{m['market_name']}**  –  Deadline: <t:{m['deadline']}:f>", unsafe_allow_html=True)
-        cols = st.columns([3,2,2])
+        st.markdown(f"**{m['market_name']}**  (ID: `{m['market_id']}`)", unsafe_allow_html=True)
+        cols = st.columns([3,1,1])
         # Input for Polymarket ID
         with cols[0]:
-            poly_input = st.text_input(
-                "Polymarket ID", key=f"polyid_{m['market_id']}"
-            )
+            poly_input = st.text_input("Polymarket Condition ID", key=f"polyid_{m['market_id']}")
         # Match button
         with cols[1]:
+            st.write("") # spacer
+            st.write("") # spacer
             if st.button("Match", key=f"match_{m['market_id']}"):
                 if poly_input:
                     save_manual_pair(m["market_id"], poly_input)
                     remove_new_bodega_market(m["market_id"])
+                    if notifier:
+                        notifier.notify_manual_pair(m['market_id'], poly_input)
                     st.success(f"Matched Bodega {m['market_name']} ↔ {poly_input}")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Enter a Polymarket condition ID before matching.")
         # Ignore button
         with cols[2]:
+            st.write("") # spacer
+            st.write("") # spacer
             if st.button("Ignore", key=f"ignore_{m['market_id']}"):
                 ignore_bodega_market(m["market_id"])
                 st.warning(f"Ignored Bodega {m['market_name']}")
-                st.experimental_rerun()
+                st.rerun()
 
 st.markdown("---")
 
 # Auto-match section
 st.subheader("🔄 Auto-Match Markets")
 if st.button("Run Auto-Match"):
-    bodes = get_all_bodegas()
-    polys = get_all_polymarkets()
-    matches, ignored = fuzzy_match_markets(bodes, polys)
-    st.success(f"Auto-match done: {len(matches)} matches, {len(ignored)} ignored.")
-    notifier.notify_auto_match(len(matches), len(ignored))
-
+    with st.spinner("Fetching markets and running fuzzy matching..."):
+        bodes = get_all_bodegas()
+        polys = get_all_polymarkets()
+        matches, ignored_count = fuzzy_match_markets(bodes, polys)
+        st.success(f"Auto-match done: {len(matches)} matches found, {ignored_count} pairs ignored.")
+        if notifier:
+            notifier.notify_auto_match(len(matches), ignored_count)
+        # Add new matches to the database
+        for b, p, score in matches:
+            add_suggested_match(b["id"], p["condition_id"], score)
+        st.rerun()
 
 st.subheader("🔍 Suggested Matches")
 suggested = load_suggested_matches()
@@ -150,84 +156,114 @@ if not suggested:
     st.info("No fuzzy-match suggestions at this time.")
 else:
     for s in suggested:
-        # fetch display names from main tables
-        b = next((m for m in get_all_bodegas() if m["id"] == s["bodega_id"]), {})
-        p = next((m for m in get_all_polymarkets() if m["condition_id"] == s["poly_id"]), {})
+        try:
+            b = b_client.fetch_market_config(s["bodega_id"])
+            p = p_client.fetch_market(s["poly_id"])
+        except Exception:
+            # Suggested pair might be for an expired market, skip it
+            continue
+
         score = s["score"]
 
         st.markdown(f"**Bodega:** {b.get('name','?')}\n\n**Polymarket:** {p.get('question','?')}\n\nScore: {score:.1f}")
-        cols = st.columns([2,2])
+        cols = st.columns([1,1,4])
         with cols[0]:
-            if st.button("Approve", key=f"approve_{s['bodega_id']}"):
+            if st.button("Approve", key=f"approve_{s['bodega_id']}_{s['poly_id']}"):
                 save_manual_pair(s["bodega_id"], s["poly_id"])
                 remove_suggested_match(s["bodega_id"], s["poly_id"])
                 st.success("✅ Match approved")
-                st.experimental_rerun()
+                st.rerun()
         with cols[1]:
-            if st.button("Decline", key=f"decline_{s['bodega_id']}"):
+            if st.button("Decline", key=f"decline_{s['bodega_id']}_{s['poly_id']}"):
                 remove_suggested_match(s["bodega_id"], s["poly_id"])
                 st.warning("🚫 Match declined")
-                st.experimental_rerun()
+                st.rerun()
 st.markdown("---")
+
 # 🚀 Check Arbitrage
 st.subheader("🚀 Check Arbitrage")
-if st.button("Check Arbitrage"):
-    ada_usd      = fx_client.get_ada_usd()
-    manual_pairs = load_manual_pairs()
-    summaries    = []
+if st.button("Check All Manual Pairs for Arbitrage"):
+    with st.spinner("Checking for arbitrage opportunities..."):
+        ada_usd = fx_client.get_ada_usd()
+        manual_pairs = load_manual_pairs()
+        summaries = []
 
-    from services.polymarket.model import build_arbitrage_table
+        if not manual_pairs:
+            st.warning("No manual pairs to check. Please add some.")
+        else:
+            progress_bar = st.progress(0)
+            for i, (b_id, p_id) in enumerate(manual_pairs):
+                try:
+                    pool = b_client.fetch_market_config(b_id)
+                    p_data = p_client.fetch_market(p_id)
 
-    for b_id, p_id in manual_pairs:
-        # — Fetch Bodega pool config & prices —
-        pool     = b_client.fetch_market_config(b_id)
-        opts     = pool['options']
-        Q_YES = next((o['shares'] for o in opts if o.get('side') == "YES"), 0)
-        Q_NO  = next((o['shares'] for o in opts if o.get('side') == "NO"),  0)
-        prices_b = b_client.fetch_prices(b_id)
-        b_yes_ada = prices_b['yesPrice_ada']
-        b_no_ada  = prices_b['noPrice_ada']
-        b_yes_usd = b_yes_ada * ada_usd
-        b_no_usd  = b_no_ada  * ada_usd
+                    if not all([pool, p_data, p_data.get('best_yes_ask'), p_data.get('best_no_ask')]):
+                        continue
 
-        # — Fetch Polymarket prices —
-        try:
-            poly = p_client.fetch_market(p_id)
-        except Exception:
-            continue
-        p_yes_usd = poly['best_yes_ask']
-        p_no_usd  = poly['best_no_ask']
-        question  = poly['question']
+                    opts = pool.get('options', [])
+                    Q_YES = next((o['shares'] for o in opts if o.get('side') == "YES"), 0)
+                    Q_NO  = next((o['shares'] for o in opts if o.get('side') == "NO"),  0)
 
-        # — Compute arbitrage (x*, profit, roi) —
-        x_star, summary, df_table = build_arbitrage_table(
-            Q_YES=Q_YES,
-            Q_NO =Q_NO,
-            P_POLY_YES=p_yes_usd,
-            ADA_TO_USD=ada_usd,
-            FEE_RATE=0.02,
-            B=3000,
-        )
-        profit = summary['profit_usd']
-        roi    = summary['roi']
+                    _, summary, _ = build_arbitrage_table(
+                        Q_YES=Q_YES, Q_NO=Q_NO,
+                        P_POLY_YES=p_data['best_yes_ask'], P_POLY_NO=p_data['best_no_ask'],
+                        ADA_TO_USD=ada_usd, FEE_RATE=FEE_RATE, B=B
+                    )
 
-        # — Only show if profitable —
-        if profit > -1000000 and roi > -1000.015:
-            notifier.notify_arb_opportunity(question, x_star, profit, roi)
+                    # Display the best opportunity for each market, even if negative.
+                    # An opportunity is considered valid if a direction was determined.
+                    if summary and summary.get("direction") != "N/A":
+                        pair_desc = f"{pool['name']} <-> {p_data['question']}"
+                        
+                        # Notifier has its own internal filter for profitability, so it's safe to call.
+                        if notifier:
+                            notifier.notify_arb_opportunity(pair_desc, summary)
 
-            summaries.append({
-                "Pair":            f"{pool['name']} ↔ {question}",
-                "Bodega Yes (USD)": f"${b_yes_usd:.4f}",
-                "Bodega No  (USD)": f"${b_no_usd:.4f}",
-                "Poly Yes   (USD)": f"${p_yes_usd:.4f}",
-                "Poly No    (USD)": f"${p_no_usd:.4f}",
-                "x*":              f"{x_star:.2f}" if x_star else "N/A",
-                "Profit (USD)":    f"${profit:.4f}",
-                "ROI":             f"{roi*100:.2f}%"
-            })
+                        profit = summary.get('profit_usd', 0)
+                        roi = summary.get('roi', 0)
+                        summaries.append({
+                            "Pair": pair_desc,
+                            "Direction": summary.get("direction", "N/A").replace("_BODEGA", ""),
+                            "Bodega Shares": f"{summary.get('bodega_shares', 0):.2f} {summary.get('bodega_side', '?')}",
+                            "Polymarket Shares": f"{summary.get('polymarket_shares', 0):.2f} {summary.get('polymarket_side', '?')}",
+                            "Profit (USD)": f"${profit:.4f}",
+                            "ROI": f"{roi*100:.2f}%"
+                        })
+                except Exception as e:
+                    st.error(f"Error checking pair ({b_id}, {p_id}): {e}")
+                
+                progress_bar.progress((i + 1) / len(manual_pairs))
+            progress_bar.empty()
 
-    # render results
-    if summaries:
-        st.table(pd.DataFrame(summaries))
-    else:
-        st.info("No positive arbitrage opportunities found.")
+            if summaries:
+                st.dataframe(pd.DataFrame(summaries))
+            else:
+                st.info("No arbitrage opportunities could be calculated for any pair.")
+st.markdown("---")
+
+# Manual Bodega markets for testing
+st.subheader("🧪 Manual Bodega Markets for Testing")
+with st.form("add_manual_bodega_market_form", clear_on_submit=True):
+    st.write("Create a fake Bodega market to test fuzzy matching. It will be active for 24 hours.")
+    manual_id = st.text_input("Manual Market ID (e.g., TEST-001)", "TEST-001")
+    manual_name = st.text_input("Manual Market Name", "Will a new Taylor Swift album be released by the end of 2025?")
+    submitted = st.form_submit_button("Add Test Market")
+    if submitted:
+        if manual_id and manual_name:
+            # Deadline 24 hours from now
+            deadline = int((time.time() + 24*60*60) * 1000)
+            add_manual_bodega_market(manual_id, manual_name, deadline)
+            st.success(f"Added test market: {manual_name}")
+            st.rerun()
+        else:
+            st.warning("Please provide both an ID and a name.")
+
+manual_test_markets = load_manual_bodega_markets()
+if manual_test_markets:
+    st.write("Active Test Markets:")
+    for m in manual_test_markets:
+        c1, c2 = st.columns([4, 1])
+        c1.write(f"`{m['id']}`: {m['name']}")
+        if c2.button("Delete", key=f"del_manual_{m['id']}"):
+            delete_manual_bodega_market(m['id'])
+            st.rerun()

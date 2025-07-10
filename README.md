@@ -1,9 +1,8 @@
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Prediction Market Arbitrage Bot
 
-# In one terminal:
-python auto_matcher.py
+## Setup
 
-# In another:
-streamlit run streamlit_app/main.py
+1. Create a virtual environment and activate it:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate

@@ -1,19 +1,20 @@
-# matching/fuzzy.py
-
 """
 Hybrid fuzzy matching and market fetchers for Bodega vs Polymarket.
 This version returns matches/ignored without writing to CSV.
 """
 import time
 import requests
+import logging
 from rapidfuzz import fuzz
 from typing import List, Tuple, Dict
 from matching.keywords import FOCUS_KEYWORDS
 from datetime import datetime
+from streamlit_app.db import load_manual_bodega_markets
+
+log = logging.getLogger(__name__)
 
 # Configuration constants
 THRESHOLD = 85  # minimum combined score to consider a match
-now_ms = int(datetime.utcnow().timestamp() * 1000)
 
 #––– FOCUS TERM EXTRACTION –––
 
@@ -73,17 +74,27 @@ def fetch_all_polymarket_clob_markets(
     while True:
         url = base_url + (f"?next_cursor={cursor}" if cursor else "")
         for attempt in range(max_retries):
-            resp = requests.get(url)
-            if resp.status_code == 429:
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 429:
+                    sleep_time = backoff_factor * (2 ** attempt)
+                    log.warning(f"Rate limited. Retrying in {sleep_time:.2f} seconds...")
+                    time.sleep(sleep_time)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                results.extend(data.get("data", []))
+                cursor = data.get("next_cursor")
+                break # Success, break retry loop
+            except requests.exceptions.RequestException as e:
+                log.error(f"Request to {url} failed on attempt {attempt+1}: {e}")
+                if attempt == max_retries - 1:
+                    raise  # Re-raise the exception if all retries fail
                 time.sleep(backoff_factor * (2 ** attempt))
-                continue
-            resp.raise_for_status()
-            break
-        else:
-            break
-        data = resp.json().get("data", [])
-        results.extend(data)
-        cursor = resp.json().get("next_cursor")
+        else: # This else belongs to the for loop, executes if loop finishes without break
+             log.error("All retries failed for Polymarket fetch.")
+             break
+
         if not cursor or cursor == "LTE=":
             break
         time.sleep(0.2)
@@ -93,41 +104,56 @@ def fetch_all_polymarket_clob_markets(
 
 def fetch_bodega_v3_active_markets(api_url: str) -> List[Dict]:
     """
-    Retrieve active Bodega V3 markets via POST /getMarketConfigs.
+    Retrieve active Bodega V3 markets via POST /getMarketConfigs, plus manual test markets.
     """
-    url = f"{api_url}/getMarketConfigs"
-    resp = requests.post(url, json={})
-    resp.raise_for_status()
-    configs = resp.json().get("marketConfigs", [])
+    active_api_markets = []
+    try:
+        url = f"{api_url}/getMarketConfigs"
+        resp = requests.post(url, json={}, timeout=10)
+        resp.raise_for_status()
+        configs = resp.json().get("marketConfigs", [])
+        
+        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        for m in configs:
+            if m.get("status") != "Active":
+                continue
+            dl = m.get("deadline")
+            if not dl or not str(dl).isdigit() or int(dl) < now_ms:
+                continue
+            active_api_markets.append({
+                "id": m["id"],
+                "name": m["name"],
+                "deadline": dl,
+                "options": m.get("options", [])
+            })
+    except requests.exceptions.RequestException as e:
+        log.warning(f"Could not fetch live Bodega markets: {e}. Using manual markets only.")
 
-    active = []
-    for m in configs:
-        if m.get("status") != "Active":
-            continue
-        dl = m.get("deadline")
-        if not dl or not str(dl).isdigit() or int(dl) < now_ms:
-            continue
-        active.append({
-            "id": m["id"],
-            "name": m["name"],
-            "deadline": dl,
-            "options": m.get("options", [])
-        })
-    return active
+    manual_test_markets = load_manual_bodega_markets()
+    
+    # Combine, ensuring no ID collisions (live markets take precedence)
+    final_markets = {m['id']: m for m in active_api_markets}
+    for m in manual_test_markets:
+        if m['id'] not in final_markets:
+            final_markets[m['id']] = m
+
+    log.info(f"Loaded {len(final_markets)} active markets ({len(active_api_markets)} live, {len(manual_test_markets)} manual).")
+    return list(final_markets.values())
 
 #––– FULL AUTO-MATCH –––
 
 def fuzzy_match_markets(
     bodega_markets: List[Dict],
     poly_markets: List[Dict]
-) -> Tuple[List[Tuple[Dict, Dict, float]], List[Tuple[str, str, str]]]:
+) -> Tuple[List[Tuple[Dict, Dict, float]], int]:
     """
     Auto-match Bodega vs Polymarket markets.
-    Returns two lists:
-      - matches: [(bodega_market, poly_market, score), ...]
-      - ignored: [(bodega_id, poly_condition_id, reason), ...]
+    Returns two items:
+      - matches: A list of [(bodega_market, poly_market, score), ...]
+      - ignored_count: The total number of pairs that did not meet the threshold.
     """
-    matches, ignored = [], []
+    matches = []
+    ignored_count = 0
 
     for b in bodega_markets:
         for p in poly_markets:
@@ -135,6 +161,5 @@ def fuzzy_match_markets(
             if ok:
                 matches.append((b, p, det["score"]))
             else:
-                ignored.append((b.get("id"), p.get("condition_id"), "score<threshold"))
-
-    return matches, ignored
+                ignored_count += 1
+    return matches, ignored_count

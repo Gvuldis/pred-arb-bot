@@ -1,45 +1,60 @@
-# jobs/fetch_new_bodega.py
-
-from services.bodega.client import BodegaClient              # :contentReference[oaicite:6]{index=6}
+import logging
+from datetime import datetime
+from config import b_client, notifier, BODEGA_API
 from streamlit_app.db import (
     load_bodega_markets,
     save_bodega_markets,
     add_new_bodega_market
 )
-from notifications.discord import DiscordNotifier, webhook_url
-import os
-from datetime import datetime
 
-BODEGA_API = os.getenv("BODEGA_API", "https://testnet.bodegamarket.io/api")
-b_client   = BodegaClient(BODEGA_API)
-notifier = DiscordNotifier(webhook_url)
+log = logging.getLogger(__name__)
+
 def fetch_and_notify_new_bodega():
-    # 1) IDs already in main snapshot
-    existing_ids = {m["market_id"] for m in load_bodega_markets()}
+    log.info("Starting job to fetch new Bodega markets...")
+    try:
+        # 1) IDs already in main snapshot
+        existing_ids = {m["market_id"] for m in load_bodega_markets()}
 
-    # 2) Fetch fresh
-    fresh = b_client.fetch_markets()
+        # 2) Fetch fresh
+        fresh_markets = b_client.fetch_markets(force_refresh=True)
 
-    # 3) Detect brand-new markets
-    for m in fresh:
-        if m["id"] not in existing_ids:
-            add_new_bodega_market({
-                "id":       m["id"],
-                "name":     m["name"],
-                "deadline": m["deadline"]
-            })
-            # human-readable deadline
-            ts = datetime.utcfromtimestamp(m["deadline"] / 1000).strftime("%Y-%m-%d %H:%M UTC")
-            msg = (
-                "🆕 **New Bodega Market**\n"
-                f"**{m['name']}**\n"
-                f"Deadline: {ts}\n"
-                f"<{BODEGA_API}/markets/{m['id']}>"
-            )
-            notifier.send(msg)
+        new_markets_found = []
+        # 3) Detect brand-new markets
+        for m in fresh_markets:
+            if m["id"] not in existing_ids:
+                add_new_bodega_market({
+                    "id":       m["id"],
+                    "name":     m["name"],
+                    "deadline": m["deadline"]
+                })
+                new_markets_found.append(m)
 
-    # 4) Persist fresh snapshot so we won’t re-notify these next time
-    save_bodega_markets([
-        {"id": m["id"], "name": m["name"], "deadline": m["deadline"]}
-        for m in fresh
-    ])
+        # 4) Notify about all new markets at once, if any
+        if notifier and new_markets_found:
+            log.info(f"Found {len(new_markets_found)} new Bodega markets. Notifying...")
+            message_parts = ["🆕 **New Bodega Markets Detected**"]
+            for m in new_markets_found:
+                # human-readable deadline
+                ts = datetime.utcfromtimestamp(m["deadline"] / 1000).strftime("%Y-%m-%d %H:%M UTC")
+                market_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={m['id']}"
+                message_parts.append(
+                    f"\n- **{m['name']}**\n  Deadline: {ts}\n  <{market_url}>"
+                )
+            # Discord has a 2000 character limit per message
+            full_message = "\n".join(message_parts)
+            if len(full_message) > 2000:
+                # Truncate if too long
+                full_message = full_message[:1900] + "\n... (message truncated)"
+            notifier.send(full_message)
+        elif new_markets_found:
+            log.warning("New markets found, but Discord notifier is not configured.")
+        else:
+            log.info("No new Bodega markets found.")
+
+        # 5) Persist fresh snapshot so we won’t re-notify these next time
+        if fresh_markets:
+            save_bodega_markets(fresh_markets)
+            log.info(f"Saved/updated {len(fresh_markets)} Bodega markets in the database.")
+            
+    except Exception as e:
+        log.error(f"Failed to fetch and notify new Bodega markets: {e}", exc_info=True)
