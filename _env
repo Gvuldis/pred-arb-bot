@@ -1,0 +1,5 @@
+# Rename this file to .env and fill in your actual values
+BODEGA_API="https://testnet.bodegamarket.io/api"
+POLY_API="https://clob.polymarket.com"
+COIN_API="https://api.coingecko.com/api/v3/simple/price?ids=cardano&vs_currencies=usd"
+DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/1255893289136160869/ZwX3Qo1JsF_fBD0kdmI8-xaEyvah9TnAV_R7dIHIKdBAwpEvj6VgmP3YcOa7j8zpyAPN"
