@@ -6,8 +6,9 @@ if str(ROOT) not in sys.path:
 
 import pandas as pd
 import streamlit as st
+import logging
 
-from config import b_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE, B
+from config import b_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE, B, log
 from services.polymarket.model import build_arbitrage_table
 
 # Database helpers
@@ -197,9 +198,13 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                 try:
                     pool  = b_client.fetch_market_config(b_id)
                     pdata = p_client.fetch_market(p_id)
-                    best_y = pdata.get("best_yes_ask")
-                    best_n = pdata.get("best_no_ask")
-                    if not pool or best_y is None or best_n is None:
+                    
+                    # Use the new price keys 'price_yes' and 'price_no'
+                    p_yes = pdata.get("price_yes")
+                    p_no = pdata.get("price_no")
+
+                    if not pool or p_yes is None or p_no is None:
+                        st.warning(f"Could not fetch complete data for pair ({b_id}, {p_id}). Skipping.")
                         continue
                     
                     opts = pool.get("options", [])
@@ -209,8 +214,8 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     x_star, summary, _ = build_arbitrage_table(
                         Q_YES=Q_YES,
                         Q_NO=Q_NO,
-                        P_POLY_YES=best_y,
-                        P_POLY_NO=best_n,
+                        P_POLY_YES=p_yes, # Use fetched price
+                        P_POLY_NO=p_no,   # Use fetched price
                         ADA_TO_USD=ada_usd,
                         FEE_RATE=FEE_RATE,
                         B=B
@@ -220,7 +225,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     if summary and summary.get("direction") not in (None, "NONE"):
                         desc = f"{pool['name']} ←→ {pdata['question']}"
                         # optionally notify
-                        if notifier:
+                        if notifier and summary.get("profit_usd", 0) > 0:
                             notifier.notify_arb_opportunity(desc, summary)
                             
                         # unpack summary
@@ -230,14 +235,14 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         cost_ada = summary["cost_ada"]
                         cost_usd = summary["cost_usd"]
                         profit_usd = summary["profit_usd"]
-                        profit_ada = profit_usd / ada_usd
+                        profit_ada = profit_usd / ada_usd if ada_usd > 0 else 0
                         margin = summary["roi"] * 100
                         
                         rows.append({
                             "Pair": desc,
                             "Direction": d,
-                            "Bodega Shares": f"{bs:.0f} ({summary['bodega_side']})",
-                            "Polymarket Shares": f"{ps:.0f} ({summary['polymarket_side']})",
+                            "Bodega Shares": f"{bs:.0f} ({summary.get('bodega_side', '?')})",
+                            "Polymarket Shares": f"{ps:.0f} ({summary.get('polymarket_side', '?')})",
                             "Cost (ADA)": f"{cost_ada:.2f}",
                             "Cost (USD)": f"{cost_usd:.2f}",
                             "Profit (ADA)": f"{profit_ada:.2f}",

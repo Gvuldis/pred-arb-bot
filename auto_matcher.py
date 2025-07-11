@@ -111,7 +111,11 @@ def run_arb_check():
                 pool = b_client.fetch_market_config(b_id)
                 p_data = p_client.fetch_market(p_id)
                 
-                if not all([pool, p_data, p_data.get('best_yes_ask'), p_data.get('best_no_ask')]):
+                # Use the new price keys 'price_yes' and 'price_no'
+                p_yes = p_data.get('price_yes')
+                p_no = p_data.get('price_no')
+
+                if not all([pool, p_data, p_yes is not None, p_no is not None]):
                     log.warning(f"Skipping pair ({b_id}, {p_id}) due to missing or incomplete market data.")
                     log.debug(f"Pool data: {pool}")
                     log.debug(f"Polymarket data: {p_data}")
@@ -125,15 +129,15 @@ def run_arb_check():
                 _, summary, _ = build_arbitrage_table(
                     Q_YES=Q_YES,
                     Q_NO=Q_NO,
-                    P_POLY_YES=p_data["best_yes_ask"],
-                    P_POLY_NO=p_data["best_no_ask"],
+                    P_POLY_YES=p_yes, # Use the fetched price
+                    P_POLY_NO=p_no,   # Use the fetched price
                     ADA_TO_USD=ada_usd,
                     FEE_RATE=FEE_RATE,
                     B=B
                 )
                 
                 # Log the summary for every pair checked to see near-misses and details
-                if summary and summary.get("direction") != "N/A":
+                if summary and summary.get("direction") not in ("N/A", "NONE"):
                     log.info(f"ARBITRAGE CHECK SUMMARY for ({b_id}, {p_id}): {summary}")
                 else:
                     log.info(f"No arbitrage opportunity could be calculated for pair ({b_id}, {p_id}).")

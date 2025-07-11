@@ -1,6 +1,0 @@
-__pycache__/
-.env
-.venv/
-.streamlit/
-.vscode/
-apscheduler.db
