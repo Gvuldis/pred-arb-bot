@@ -182,65 +182,83 @@ st.markdown("---")
 
 # 🚀 Check Arbitrage
 st.subheader("🚀 Check Arbitrage")
+
 if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking for arbitrage opportunities..."):
-        ada_usd = fx_client.get_ada_usd()
+        ada_usd      = fx_client.get_ada_usd()
         manual_pairs = load_manual_pairs()
-        summaries = []
-
+        rows = []
+        
         if not manual_pairs:
             st.warning("No manual pairs to check. Please add some.")
         else:
-            progress_bar = st.progress(0)
-            for i, (b_id, p_id) in enumerate(manual_pairs):
+            prog = st.progress(0)
+            for i, (b_id, p_id) in enumerate(manual_pairs, start=1):
                 try:
-                    pool = b_client.fetch_market_config(b_id)
-                    p_data = p_client.fetch_market(p_id)
-
-                    if not all([pool, p_data, p_data.get('best_yes_ask'), p_data.get('best_no_ask')]):
+                    pool  = b_client.fetch_market_config(b_id)
+                    pdata = p_client.fetch_market(p_id)
+                    best_y = pdata.get("best_yes_ask")
+                    best_n = pdata.get("best_no_ask")
+                    if not pool or best_y is None or best_n is None:
                         continue
-
-                    opts = pool.get('options', [])
-                    Q_YES = next((o['shares'] for o in opts if o.get('side') == "YES"), 0)
-                    Q_NO  = next((o['shares'] for o in opts if o.get('side') == "NO"),  0)
-
-                    _, summary, _ = build_arbitrage_table(
-                        Q_YES=Q_YES, Q_NO=Q_NO,
-                        P_POLY_YES=p_data['best_yes_ask'], P_POLY_NO=p_data['best_no_ask'],
-                        ADA_TO_USD=ada_usd, FEE_RATE=FEE_RATE, B=B
+                    
+                    opts = pool.get("options", [])
+                    Q_YES = next((o["shares"] for o in opts if o["side"]=="YES"), 0)
+                    Q_NO  = next((o["shares"] for o in opts if o["side"]=="NO"),  0)
+                    
+                    x_star, summary, _ = build_arbitrage_table(
+                        Q_YES=Q_YES,
+                        Q_NO=Q_NO,
+                        P_POLY_YES=best_y,
+                        P_POLY_NO=best_n,
+                        ADA_TO_USD=ada_usd,
+                        FEE_RATE=FEE_RATE,
+                        B=B
                     )
-
-                    # Display the best opportunity for each market, even if negative.
-                    # An opportunity is considered valid if a direction was determined.
-                    if summary and summary.get("direction") != "N/A":
-                        pair_desc = f"{pool['name']} <-> {p_data['question']}"
-                        
-                        # Notifier has its own internal filter for profitability, so it's safe to call.
+                    
+                    # only display if we found a direction
+                    if summary and summary.get("direction") not in (None, "NONE"):
+                        desc = f"{pool['name']} ←→ {pdata['question']}"
+                        # optionally notify
                         if notifier:
-                            notifier.notify_arb_opportunity(pair_desc, summary)
-
-                        profit = summary.get('profit_usd', 0)
-                        roi = summary.get('roi', 0)
-                        summaries.append({
-                            "Pair": pair_desc,
-                            "Direction": summary.get("direction", "N/A").replace("_BODEGA", ""),
-                            "Bodega Shares": f"{summary.get('bodega_shares', 0):.2f} {summary.get('bodega_side', '?')}",
-                            "Polymarket Shares": f"{summary.get('polymarket_shares', 0):.2f} {summary.get('polymarket_side', '?')}",
-                            "Profit (USD)": f"${profit:.4f}",
-                            "ROI": f"{roi*100:.2f}%"
+                            notifier.notify_arb_opportunity(desc, summary)
+                            
+                        # unpack summary
+                        d = summary["direction"].replace("_BODEGA","")
+                        bs = summary["bodega_shares"]
+                        ps = summary["polymarket_shares"]
+                        cost_ada = summary["cost_ada"]
+                        cost_usd = summary["cost_usd"]
+                        profit_usd = summary["profit_usd"]
+                        profit_ada = profit_usd / ada_usd
+                        margin = summary["roi"] * 100
+                        
+                        rows.append({
+                            "Pair": desc,
+                            "Direction": d,
+                            "Bodega Shares": f"{bs:.0f} ({summary['bodega_side']})",
+                            "Polymarket Shares": f"{ps:.0f} ({summary['polymarket_side']})",
+                            "Cost (ADA)": f"{cost_ada:.2f}",
+                            "Cost (USD)": f"{cost_usd:.2f}",
+                            "Profit (ADA)": f"{profit_ada:.2f}",
+                            "Profit (USD)": f"{profit_usd:.2f}",
+                            "Profit Margin": f"{margin:.2f}%",
                         })
+                        
                 except Exception as e:
-                    st.error(f"Error checking pair ({b_id}, {p_id}): {e}")
+                    log.exception("Error checking pair %s / %s", b_id, p_id)
+                    st.error(f"Error for ({b_id}, {p_id}): {e}")
+                    
+                prog.progress(i / len(manual_pairs))
                 
-                progress_bar.progress((i + 1) / len(manual_pairs))
-            progress_bar.empty()
-
-            if summaries:
-                st.dataframe(pd.DataFrame(summaries))
+            prog.empty()
+            
+            if rows:
+                st.dataframe(pd.DataFrame(rows))
             else:
-                st.info("No arbitrage opportunities could be calculated for any pair.")
+                st.info("No arbitrage opportunities found.")
+                
 st.markdown("---")
-
 # Manual Bodega markets for testing
 st.subheader("🧪 Manual Bodega Markets for Testing")
 with st.form("add_manual_bodega_market_form", clear_on_submit=True):
