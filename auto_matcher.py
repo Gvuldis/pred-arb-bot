@@ -172,14 +172,17 @@ if __name__ == "__main__":
     prune_inactive_pairs()
     log.info("Initial jobs complete.")
 
-    sched.add_job(fetch_and_notify_new_bodega, "cron", minute=2)
-    sched.add_job(fetch_and_save_polymarkets, "cron", minute=4)
-    sched.add_job(run_auto_match, "cron", minute=0)
-    sched.add_job(run_arb_check, "interval", minutes=5)
-    sched.add_job(prune_inactive_pairs, "cron", minute=10)
+    # Schedule recurring jobs
+    sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15") # Check for new markets every 15 mins
+    sched.add_job(fetch_and_save_polymarkets, "cron", minute="*/15")
+    sched.add_job(prune_inactive_pairs, "cron", hour="*") # Prune once an hour
+    
+    # User-defined schedule
+    sched.add_job(run_auto_match, "interval", minutes=30)
+    sched.add_job(run_arb_check, "interval", minutes=3)
 
     log.info(
-        "Scheduler started — fetch jobs hourly, auto-match hourly, arbitrage-check every 5min, prune hourly"
+        "Scheduler started — arb-check every 3min, auto-match every 30min."
     )
     try:
         sched.start()
