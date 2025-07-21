@@ -1,6 +1,7 @@
 import requests
 import logging
 import time
+import json
 from typing import List, Dict
 
 log = logging.getLogger(__name__)
@@ -18,7 +19,13 @@ class BodegaClient:
         url = f"{self.api_url}/getMarketConfigs"
         resp = requests.post(url, json={}, timeout=10)
         resp.raise_for_status()
-        configs = resp.json().get("marketConfigs", [])
+        
+        # --- ADD THESE LINES FOR DEBUGGING ---
+        raw_data = resp.json()
+        log.info(f"DBG: Raw Bodega API response: {json.dumps(raw_data, indent=2)}")
+        # --- END DEBUGGING LINES ---
+
+        configs = raw_data.get("marketConfigs", [])
         
         now_ms = int(time.time() * 1000)
         active = []
@@ -30,13 +37,16 @@ class BodegaClient:
             if not dl or not str(dl).isdigit() or int(dl) < now_ms:
                 continue
 
-            # Standardize options to have 'side' and 'shares'
+            # Standardize options to have 'side' and 'shares'.
+            # Per user feedback, the 'shares' from this endpoint are incorrect.
+            # The correct liquidity shares (q_yes, q_no) are fetched from /getPredictionInfo.
+            # We set shares to 0 here to avoid confusion.
             opts = m.get("options", [])
             std_opts = []
             for o in opts:
                 std_opts.append({
                     'side': o.get('side'),
-                    'shares': o.get('shares', o.get('lpShares', 0))
+                    'shares': 0
                 })
             m['options'] = std_opts
             active.append(m)
@@ -56,7 +66,7 @@ class BodegaClient:
     def fetch_prices(self, market_id: str) -> Dict:
         """
         Fetch YES/NO volumes and prices for a given market ID via GET /getPredictionInfo?id=...
-        Returns ADA-denominated prices & volumes.
+        Returns ADA-denominated prices & volumes. The 'volumes' are the liquidity shares.
         """
         url = f"{self.api_url}/getPredictionInfo"
         r = requests.get(url, params={"id": market_id}, timeout=10)
@@ -67,8 +77,8 @@ class BodegaClient:
         LP = 1_000_000
         yes_price_ada = info.get("prices", {}).get("yesPrice", 0) / LP
         no_price_ada  = info.get("prices", {}).get("noPrice",  0) / LP
-        yes_vol_ada   = info.get("volumes", {}).get("yesVolume", 0) / LP
-        no_vol_ada    = info.get("volumes", {}).get("noVolume",  0) / LP
+        yes_vol_ada   = info.get("volumes", {}).get("yesVolume", 0)
+        no_vol_ada    = info.get("volumes", {}).get("noVolume",  0)
 
         return {
             "yesPrice_ada": yes_price_ada,

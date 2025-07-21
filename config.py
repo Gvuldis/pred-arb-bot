@@ -21,7 +21,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # LMSR constants for arbitrage calculation
 FEE_RATE = 0.02    # 2% fee on Bodega trades
-B = 3000           # LMSR liquidity parameter
+         # LMSR liquidity parameter
 
 # --- Singleton Clients ---
 # Initializing clients here makes them act as singletons for the application's lifetime.

@@ -19,8 +19,9 @@ class PolymarketClient:
 
     def fetch_market(self, condition_id: str) -> Dict:
         """
-        Fetch a single Polymarket market by condition_id, finds the YES/NO token IDs,
-        and then fetches their respective prices from the /price endpoint as requested.
+        Fetch a single Polymarket market by condition_id.
+        This now fetches the full order book for both YES and NO outcomes
+        and derives the best price from it.
         """
         # Step 1: Fetch market details to get token IDs
         market_url = f"{self.api_url}/markets/{condition_id}"
@@ -30,63 +31,56 @@ class PolymarketClient:
             market_data = market_resp.json()
         except requests.exceptions.RequestException as e:
             log.error(f"Failed to fetch market data for {condition_id}: {e}")
-            # Return a structure that won't crash downstream checks
-            return {'condition_id': condition_id, 'question': 'FETCH_ERROR', 'price_yes': None, 'price_no': None, 'active': False, 'closed': True}
+            return {
+                'condition_id': condition_id, 'question': 'FETCH_ERROR',
+                'price_yes': None, 'price_no': None,
+                'order_book_yes': [], 'order_book_no': [],
+                'active': False, 'closed': True
+            }
 
         # Step 2: Extract token IDs for "Yes" and "No" outcomes
         tokens = market_data.get("tokens", [])
-        yes_token_id = None
-        no_token_id = None
-        for token in tokens:
-            if token.get("outcome") == "Yes":
-                yes_token_id = token.get("token_id")
-            elif token.get("outcome") == "No":
-                no_token_id = token.get("token_id")
+        yes_token_id = next((token.get("token_id") for token in tokens if token.get("outcome") == "Yes"), None)
+        no_token_id = next((token.get("token_id") for token in tokens if token.get("outcome") == "No"), None)
 
-        if not yes_token_id or not no_token_id:
-            log.warning(f"Could not find YES/NO token IDs for market {condition_id}")
-            return {
-                'condition_id': condition_id,
-                'question': market_data.get('question'),
-                'price_yes': None,
-                'price_no': None,
-                'active': market_data.get('active', False),
-                'closed': market_data.get('closed', True),
-            }
+        order_book_yes = []
+        order_book_no = []
 
-        # Step 3: Fetch prices for each token ID, specifying the 'buy' side
-        price_url = f"{self.api_url}/price"
-        yes_price = None
-        no_price = None
-
+        # Step 3: Fetch order books for each token ID using the /book endpoint
+        order_book_url = f"{self.api_url}/book"
         try:
-            # Fetch YES price
+            # Fetch YES order book
             if yes_token_id:
-                params_yes = {"token_id": yes_token_id, "side": "buy"}
-                yes_price_resp = requests.get(price_url, params=params_yes, timeout=10)
-                yes_price_resp.raise_for_status()
-                yes_price_data = yes_price_resp.json()
-                yes_price = float(yes_price_data.get('price')) if yes_price_data.get('price') else None
+                params_yes_book = {"token_id": yes_token_id}
+                yes_book_resp = requests.get(order_book_url, params=params_yes_book, timeout=10)
+                yes_book_resp.raise_for_status()
+                # "asks" are what we can buy from
+                yes_asks = yes_book_resp.json().get("asks", [])
+                # Format: list of (price, size) tuples, sorted by price
+                order_book_yes = sorted([(float(ask['price']), int(float(ask['size']))) for ask in yes_asks if float(ask['size']) > 0], key=lambda x: x[0])
 
-            # Fetch NO price
+            # Fetch NO order book
             if no_token_id:
-                params_no = {"token_id": no_token_id, "side": "buy"}
-                no_price_resp = requests.get(price_url, params=params_no, timeout=10)
-                no_price_resp.raise_for_status()
-                no_price_data = no_price_resp.json()
-                no_price = float(no_price_data.get('price')) if no_price_data.get('price') else None
+                params_no_book = {"token_id": no_token_id}
+                no_book_resp = requests.get(order_book_url, params=params_no_book, timeout=10)
+                no_book_resp.raise_for_status()
+                no_asks = no_book_resp.json().get("asks", [])
+                order_book_no = sorted([(float(ask['price']), int(float(ask['size']))) for ask in no_asks if float(ask['size']) > 0], key=lambda x: x[0])
 
         except (requests.exceptions.RequestException, ValueError, TypeError) as e:
-            log.error(f"Failed to fetch or parse price for tokens in market {condition_id}: {e}")
-            # Ensure prices are None if fetching fails, to prevent bad calculations
-            yes_price = None
-            no_price = None
+            log.error(f"Failed to fetch or parse order book for tokens in market {condition_id}: {e}")
+
+        # Step 4: Derive best price from order book (lowest ask) for reference
+        yes_price = order_book_yes[0][0] if order_book_yes else None
+        no_price = order_book_no[0][0] if order_book_no else None
 
         return {
             'condition_id': condition_id,
             'question': market_data.get('question'),
             'price_yes': yes_price,
             'price_no': no_price,
+            'order_book_yes': order_book_yes,
+            'order_book_no': order_book_no,
             'active': market_data.get('active', False),
             'closed': market_data.get('closed', True),
         }

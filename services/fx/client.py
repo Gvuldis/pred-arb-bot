@@ -6,7 +6,7 @@ log = logging.getLogger(__name__)
 class FXClient:
     def __init__(self, coingecko_url:str):
         self.url = coingecko_url
-        self.fallback_price = 0.60
+        self.fallback_price = 0.85
 
     def get_ada_usd(self) -> float:
         """

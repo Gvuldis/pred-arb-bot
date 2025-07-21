@@ -8,8 +8,8 @@ import pandas as pd
 import streamlit as st
 import logging
 
-from config import b_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE, B, log
-from services.polymarket.model import build_arbitrage_table
+from config import b_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE, log
+from services.polymarket.model import build_arbitrage_table, infer_b
 
 # Database helpers
 from streamlit_app.db import (
@@ -43,7 +43,6 @@ init_db()
 @st.cache_data(ttl=300)
 def get_all_bodegas():
     markets = fetch_bodega_v3_active_markets(BODEGA_API)
-    # We only save the *real* markets, not the manual test ones
     real_markets = [m for m in markets if not m['id'].startswith("TEST-")]
     if real_markets:
         save_bodega_markets(real_markets)
@@ -64,9 +63,9 @@ st.title("🌉 Arb-Bot Dashboard")
 st.subheader("➕ Add Manual Pair")
 col1, col2, col3 = st.columns([3,3,1])
 with col1:
-    bid = st.text_input("Bodega ID")
+    bid = st.text_input("Bodega ID", key="manual_pair_bodega_id")
 with col2:
-    search = st.text_input("Search Polymarket")
+    search = st.text_input("Search Polymarket", key="manual_pair_poly_search")
     pm_results = p_client.search_markets(search) if search else []
     options = {f'{m["question"]} ({m["condition_id"]})': m["condition_id"] for m in pm_results}
     pid_label = st.selectbox("Pick Polymarket market", [""] + list(options.keys()))
@@ -91,8 +90,8 @@ if manual_pairs:
     for b_id, p_id in manual_pairs:
         c1, c2 = st.columns([9, 1])
         b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
-        #polymarket url unavailable, the url works differently
-        c1.markdown(f"• [Bodega]({b_url}) `({b_id})` ↔ [Polymarket] `({p_id})`", unsafe_allow_html=True)
+        p_url = f"https://polymarket.com/event/{p_id}"
+        c1.markdown(f"• [Bodega]({b_url}) `({b_id})` ↔ [Polymarket]({p_url}) `({p_id})`", unsafe_allow_html=True)
         if c2.button("❌", key=f"del_pair_{b_id}_{p_id}", help="Delete this pair"):
             delete_manual_pair(b_id, p_id)
             st.rerun()
@@ -108,10 +107,8 @@ else:
     for m in pending:
         st.markdown(f"**{m['market_name']}**  (ID: `{m['market_id']}`)", unsafe_allow_html=True)
         cols = st.columns([3,1,1])
-        # Input for Polymarket ID
         with cols[0]:
             poly_input = st.text_input("Polymarket Condition ID", key=f"polyid_{m['market_id']}")
-        # Match button
         with cols[1]:
             st.write("") # spacer
             st.write("") # spacer
@@ -125,7 +122,6 @@ else:
                     st.rerun()
                 else:
                     st.error("Enter a Polymarket condition ID before matching.")
-        # Ignore button
         with cols[2]:
             st.write("") # spacer
             st.write("") # spacer
@@ -146,7 +142,6 @@ if st.button("Run Auto-Match"):
         st.success(f"Auto-match done: {len(matches)} matches found, {ignored_count} pairs ignored.")
         if notifier:
             notifier.notify_auto_match(len(matches), ignored_count)
-        # Add new matches to the database
         for b, p, score in matches:
             add_suggested_match(b["id"], p["condition_id"], score)
         st.rerun()
@@ -161,24 +156,19 @@ else:
             b = b_client.fetch_market_config(s["bodega_id"])
             p = p_client.fetch_market(s["poly_id"])
         except Exception:
-            # Suggested pair might be for an expired market, skip it
             continue
-
         score = s["score"]
-
         st.markdown(f"**Bodega:** {b.get('name','?')}\n\n**Polymarket:** {p.get('question','?')}\n\nScore: {score:.1f}")
         cols = st.columns([1,1,4])
-        with cols[0]:
-            if st.button("Approve", key=f"approve_{s['bodega_id']}_{s['poly_id']}"):
-                save_manual_pair(s["bodega_id"], s["poly_id"])
-                remove_suggested_match(s["bodega_id"], s["poly_id"])
-                st.success("✅ Match approved")
-                st.rerun()
-        with cols[1]:
-            if st.button("Decline", key=f"decline_{s['bodega_id']}_{s['poly_id']}"):
-                remove_suggested_match(s["bodega_id"], s["poly_id"])
-                st.warning("🚫 Match declined")
-                st.rerun()
+        if cols[0].button("Approve", key=f"approve_{s['bodega_id']}_{s['poly_id']}"):
+            save_manual_pair(s["bodega_id"], s["poly_id"])
+            remove_suggested_match(s["bodega_id"], s["poly_id"])
+            st.success("✅ Match approved")
+            st.rerun()
+        if cols[1].button("Decline", key=f"decline_{s['bodega_id']}_{s['poly_id']}"):
+            remove_suggested_match(s["bodega_id"], s["poly_id"])
+            st.warning("🚫 Match declined")
+            st.rerun()
 st.markdown("---")
 
 # 🚀 Check Arbitrage
@@ -186,9 +176,9 @@ st.subheader("🚀 Check Arbitrage")
 
 if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking for arbitrage opportunities..."):
-        ada_usd      = fx_client.get_ada_usd()
+        ada_usd = fx_client.get_ada_usd()
         manual_pairs = load_manual_pairs()
-        rows = []
+        table_rows = []
         
         if not manual_pairs:
             st.warning("No manual pairs to check. Please add some.")
@@ -196,84 +186,93 @@ if st.button("Check All Manual Pairs for Arbitrage"):
             prog = st.progress(0)
             for i, (b_id, p_id) in enumerate(manual_pairs, start=1):
                 try:
-                    pool  = b_client.fetch_market_config(b_id)
+                    pool = b_client.fetch_market_config(b_id)
                     pdata = p_client.fetch_market(p_id)
+                    bodega_prediction_info = b_client.fetch_prices(b_id)
                     
-                    # Use the new price keys 'price_yes' and 'price_no'
-                    p_yes = pdata.get("price_yes")
-                    p_no = pdata.get("price_no")
+                    order_book_yes = pdata.get("order_book_yes")
+                    order_book_no = pdata.get("order_book_no")
 
-                    if not pool or p_yes is None or p_no is None:
+                    if not all([pool, pdata, bodega_prediction_info, order_book_yes, order_book_no]):
                         st.warning(f"Could not fetch complete data for pair ({b_id}, {p_id}). Skipping.")
                         continue
                     
-                    opts = pool.get("options", [])
-                    Q_YES = next((o["shares"] for o in opts if o["side"]=="YES"), 0)
-                    Q_NO  = next((o["shares"] for o in opts if o["side"]=="NO"),  0)
+                    Q_YES = bodega_prediction_info.get("yesVolume_ada", 0)
+                    Q_NO = bodega_prediction_info.get("noVolume_ada", 0)
                     
+                    # --- DYNAMIC B CALCULATION ---
+                    p_bod_yes = bodega_prediction_info.get("yesPrice_ada")
+
+                    if not p_bod_yes:
+                        st.warning(f"Skipping pair ({b_id}, {p_id}): Could not fetch live Bodega YES price.")
+                        continue
+                    
+                    try:
+                        inferred_B = infer_b(Q_YES, Q_NO, p_bod_yes)
+                        st.info(f"Inferred B for market {b_id}: {inferred_B:.2f}")
+                    except ValueError as e:
+                        st.warning(f"Skipping pair ({b_id}, {p_id}): Could not infer B parameter. Reason: {e}")
+                        continue
+                    # --- END DYNAMIC B CALCULATION ---
+
                     x_star, summary, _ = build_arbitrage_table(
-                        Q_YES=Q_YES,
-                        Q_NO=Q_NO,
-                        P_POLY_YES=p_yes, # Use fetched price
-                        P_POLY_NO=p_no,   # Use fetched price
-                        ADA_TO_USD=ada_usd,
-                        FEE_RATE=FEE_RATE,
-                        B=B
+                        Q_YES=Q_YES, Q_NO=Q_NO,
+                        ORDER_BOOK_YES=order_book_yes, ORDER_BOOK_NO=order_book_no,
+                        ADA_TO_USD=ada_usd, FEE_RATE=FEE_RATE, B=inferred_B
                     )
                     
-                    # only display if we found a direction
-                    if summary and summary.get("direction") not in (None, "NONE"):
-                        desc = f"{pool['name']} ←→ {pdata['question']}"
-                        # optionally notify
-                        if notifier and summary.get("profit_usd", 0) > 0:
-                            notifier.notify_arb_opportunity(desc, summary)
-                            
-                        # unpack summary
-                        d = summary["direction"].replace("_BODEGA","")
-                        bs = summary["bodega_shares"]
-                        ps = summary["polymarket_shares"]
-                        cost_ada = summary["cost_ada"]
-                        cost_usd = summary["cost_usd"]
-                        profit_usd = summary["profit_usd"]
-                        profit_ada = profit_usd / ada_usd if ada_usd > 0 else 0
-                        margin = summary["roi"] * 100
+                    if summary and summary.get("profit_usd", 0) > 0:
+                        desc = f"{pool['name']} → {pdata['question']}"
+                        st.write(f"**Found Opportunity for:** {desc}")
                         
-                        rows.append({
-                            "Pair": desc,
-                            "Direction": d,
-                            "Bodega Shares": f"{bs:.0f} ({summary.get('bodega_side', '?')})",
-                            "Polymarket Shares": f"{ps:.0f} ({summary.get('polymarket_side', '?')})",
-                            "Cost (ADA)": f"{cost_ada:.2f}",
-                            "Cost (USD)": f"{cost_usd:.2f}",
-                            "Profit (ADA)": f"{profit_ada:.2f}",
-                            "Profit (USD)": f"{profit_usd:.2f}",
-                            "Profit Margin": f"{margin:.2f}%",
-                        })
+                        if notifier:
+                            notifier.notify_arb_opportunity(desc, summary, b_id, p_id, BODEGA_API)
+                        
+                        row_bodega = {
+                            "Market": "Bodega", "Side": summary['bodega_side'],
+                            "StartP": f"{summary['p_start']:.4f}", "EndP": f"{summary['p_end']:.4f}",
+                            "Shares": f"{summary['bodega_shares']}", "Cost ADA": f"{summary['cost_bod_ada']:.2f}",
+                            "Fee ADA": f"{summary['fee_bod_ada']:.2f}", "AvgPoly": "",
+                            "Comb ADA": f"{summary['comb_ada']:.2f}", "Comb USD": f"{summary['comb_usd']:.2f}",
+                            "Profit ADA": f"{summary['profit_ada']:.2f}", "Profit USD": f"{summary['profit_usd']:.2f}",
+                            "Margin": f"{summary['roi']*100:.2f}%", "Fill": "",
+                            "Inferred B": f"{summary['inferred_B']:.2f}",
+                            "ADA/USD Rate": f"${summary['ada_usd_rate']:.4f}",
+                        }
+                        row_poly = {
+                            "Market": "Polymarket", "Side": summary['polymarket_side'], "Shares": f"{summary['polymarket_shares']}",
+                            "Cost ADA": f"{summary['cost_poly_ada']:.2f}", "AvgPoly": f"{summary['avg_poly_price']:.4f}",
+                            "Fill": f"{summary['fill']}",
+                        }
+                        table_rows.append(row_bodega)
+                        table_rows.append(row_poly)
                         
                 except Exception as e:
                     log.exception("Error checking pair %s / %s", b_id, p_id)
                     st.error(f"Error for ({b_id}, {p_id}): {e}")
-                    
-                prog.progress(i / len(manual_pairs))
                 
+                prog.progress(i / len(manual_pairs))
             prog.empty()
             
-            if rows:
-                st.dataframe(pd.DataFrame(rows))
+            if table_rows:
+                columns = ["Market", "Side", "StartP", "EndP", "Shares", "Cost ADA", "Fee ADA", "AvgPoly",
+                           "Comb ADA", "Comb USD", "Profit ADA", "Profit USD", "Margin", "Fill",
+                           "Inferred B", "ADA/USD Rate"]
+                df = pd.DataFrame(table_rows, columns=columns).fillna('')
+                st.dataframe(df)
             else:
                 st.info("No arbitrage opportunities found.")
-                
+
 st.markdown("---")
 # Manual Bodega markets for testing
 st.subheader("🧪 Manual Bodega Markets for Testing")
 with st.form("add_manual_bodega_market_form", clear_on_submit=True):
     st.write("Create a fake Bodega market to test fuzzy matching. It will be active for 24 hours.")
-    manual_id = st.text_input("Manual Market ID (e.g., TEST-001)", "TEST-001")
-    manual_name = st.text_input("Manual Market Name", "Will a new Taylor Swift album be released by the end of 2025?")
+    manual_id = st.text_input("Manual Market ID (e.g., TEST-001)", "TEST-001", key="test_market_id")
+    manual_name = st.text_input("Manual Market Name", "Will a new Taylor Swift album be released by the end of 2025?", key="test_market_name")
     submitted = st.form_submit_button("Add Test Market")
     if submitted:
         if manual_id and manual_name:
-            # Deadline 24 hours from now
             deadline = int((time.time() + 24*60*60) * 1000)
             add_manual_bodega_market(manual_id, manual_name, deadline)
             st.success(f"Added test market: {manual_name}")
