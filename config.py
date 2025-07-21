@@ -20,7 +20,7 @@ COIN_API = os.getenv("COIN_API", "https://api.coingecko.com/api/v3/simple/price?
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # LMSR constants for arbitrage calculation
-FEE_RATE = 0.02    # 2% fee on Bodega trades
+FEE_RATE = 0.04    # 2% fee on Bodega trades
          # LMSR liquidity parameter
 
 # --- Singleton Clients ---
