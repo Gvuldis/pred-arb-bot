@@ -1,4 +1,3 @@
-# services/polymarket/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -152,7 +151,7 @@ def build_arbitrage_table(
             }
             if profit_usd > best_opp.get("profit_usd", -1): best_opp = opp
 
-    if best_opp.get("profit_usd", -1) <= 0:
-        return None, {"direction": "NONE", "profit_usd": 0.0, "reason": "No profitable opportunity found."}, None
+    if "direction" not in best_opp:
+        return None, {"direction": "NONE", "profit_usd": 0.0, "reason": "No opportunity found (no price crossing)."}, None
 
     return best_opp.get("bodega_shares"), best_opp, None
