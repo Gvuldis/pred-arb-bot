@@ -178,8 +178,8 @@ if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking for arbitrage opportunities..."):
         ada_usd = fx_client.get_ada_usd()
         manual_pairs = load_manual_pairs()
-        table_rows = []
-        
+        all_opportunities = []
+
         if not manual_pairs:
             st.warning("No manual pairs to check. Please add some.")
         else:
@@ -189,27 +189,27 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     pool = b_client.fetch_market_config(b_id)
                     pdata = p_client.fetch_market(p_id)
                     bodega_prediction_info = b_client.fetch_prices(b_id)
-                    
+
                     order_book_yes = pdata.get("order_book_yes")
                     order_book_no = pdata.get("order_book_no")
 
                     if not all([pool, pdata, bodega_prediction_info, order_book_yes, order_book_no]):
                         st.warning(f"Could not fetch complete data for pair ({b_id}, {p_id}). Skipping.")
                         continue
-                    
+
                     Q_YES = bodega_prediction_info.get("yesVolume_ada", 0)
                     Q_NO = bodega_prediction_info.get("noVolume_ada", 0)
-                    
+
                     # --- DYNAMIC B CALCULATION ---
                     p_bod_yes = bodega_prediction_info.get("yesPrice_ada")
 
                     if not p_bod_yes:
                         st.warning(f"Skipping pair ({b_id}, {p_id}): Could not fetch live Bodega YES price.")
                         continue
-                    
+
                     try:
                         inferred_B = infer_b(Q_YES, Q_NO, p_bod_yes)
-                        st.info(f"Inferred B for market {b_id}: {inferred_B:.2f}")
+                        # st.info(f"Inferred B for market {b_id}: {inferred_B:.2f}") # Too verbose for UI
                     except ValueError as e:
                         st.warning(f"Skipping pair ({b_id}, {p_id}): Could not infer B parameter. Reason: {e}")
                         continue
@@ -220,48 +220,68 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         ORDER_BOOK_YES=order_book_yes, ORDER_BOOK_NO=order_book_no,
                         ADA_TO_USD=ada_usd, FEE_RATE=FEE_RATE, B=inferred_B
                     )
-                    
-                    if summary and summary.get("profit_usd", 0) > 0:
-                        desc = f"{pool['name']} → {pdata['question']}"
-                        st.write(f"**Found Opportunity for:** {desc}")
-                        
-                        if notifier:
-                            notifier.notify_arb_opportunity(desc, summary, b_id, p_id, BODEGA_API)
-                        
-                        row_bodega = {
-                            "Market": "Bodega", "Side": summary['bodega_side'],
-                            "StartP": f"{summary['p_start']:.4f}", "EndP": f"{summary['p_end']:.4f}",
-                            "Shares": f"{summary['bodega_shares']}", "Cost ADA": f"{summary['cost_bod_ada']:.2f}",
-                            "Fee ADA": f"{summary['fee_bod_ada']:.2f}", "AvgPoly": "",
-                            "Comb ADA": f"{summary['comb_ada']:.2f}", "Comb USD": f"{summary['comb_usd']:.2f}",
-                            "Profit ADA": f"{summary['profit_ada']:.2f}", "Profit USD": f"{summary['profit_usd']:.2f}",
-                            "Margin": f"{summary['roi']*100:.2f}%", "Fill": "",
-                            "Inferred B": f"{summary['inferred_B']:.2f}",
-                            "ADA/USD Rate": f"${summary['ada_usd_rate']:.4f}",
-                        }
-                        row_poly = {
-                            "Market": "Polymarket", "Side": summary['polymarket_side'], "Shares": f"{summary['polymarket_shares']}",
-                            "Cost ADA": f"{summary['cost_poly_ada']:.2f}", "AvgPoly": f"{summary['avg_poly_price']:.4f}",
-                            "Fill": f"{summary['fill']}",
-                        }
-                        table_rows.append(row_bodega)
-                        table_rows.append(row_poly)
-                        
+
+                    if summary and summary.get("direction") not in ("N/A", "NONE"):
+                        desc = f"{pool['name']} ↔ {pdata['question']}"
+                        all_opportunities.append({
+                            "description": desc,
+                            "summary": summary,
+                            "b_id": b_id,
+                            "p_id": p_id
+                        })
+
                 except Exception as e:
                     log.exception("Error checking pair %s / %s", b_id, p_id)
                     st.error(f"Error for ({b_id}, {p_id}): {e}")
-                
+
                 prog.progress(i / len(manual_pairs))
             prog.empty()
-            
-            if table_rows:
-                columns = ["Market", "Side", "StartP", "EndP", "Shares", "Cost ADA", "Fee ADA", "AvgPoly",
-                           "Comb ADA", "Comb USD", "Profit ADA", "Profit USD", "Margin", "Fill",
-                           "Inferred B", "ADA/USD Rate"]
-                df = pd.DataFrame(table_rows, columns=columns).fillna('')
-                st.dataframe(df)
+
+            if all_opportunities:
+                # Sort opportunities by profit (descending)
+                all_opportunities.sort(key=lambda o: o["summary"].get("profit_usd", -float('inf')), reverse=True)
+
+                table_rows = []
+                for opp in all_opportunities:
+                    summary = opp['summary']
+                    b_id = opp['b_id']
+                    p_id = opp['p_id']
+
+                    # Notify only for profitable opportunities with decent ROI
+                    if summary.get("profit_usd", 0) > 0 and summary.get("roi", 0) > 0.015:
+                        if notifier:
+                            notifier.notify_arb_opportunity(opp['description'], summary, b_id, p_id, BODEGA_API)
+                    
+                    row_bodega = {
+                        "Pair": opp['description'][:80] + '...' if len(opp['description']) > 80 else opp['description'],
+                        "Market": "Bodega", "Side": summary['bodega_side'],
+                        "StartP": f"{summary['p_start']:.4f}", "EndP": f"{summary['p_end']:.4f}",
+                        "Shares": f"{summary['bodega_shares']}", "Cost ADA": f"{summary['cost_bod_ada']:.2f}",
+                        "Fee ADA": f"{summary['fee_bod_ada']:.2f}", "AvgPoly": "",
+                        "Comb ADA": f"{summary['comb_ada']:.2f}", "Comb USD": f"{summary['comb_usd']:.2f}",
+                        "Profit ADA": f"{summary['profit_ada']:.2f}", "Profit USD": f"{summary['profit_usd']:.2f}",
+                        "Margin": f"{summary['roi']*100:.2f}%", "Fill": "",
+                        "Inferred B": f"{summary['inferred_B']:.2f}",
+                        "ADA/USD Rate": f"${summary['ada_usd_rate']:.4f}",
+                    }
+                    row_poly = {
+                        "Pair": opp['description'][:80] + '...' if len(opp['description']) > 80 else opp['description'],
+                        "Market": "Polymarket", "Side": summary['polymarket_side'], "Shares": f"{summary['polymarket_shares']}",
+                        "Cost ADA": f"{summary['cost_poly_ada']:.2f}", "AvgPoly": f"{summary['avg_poly_price']:.4f}",
+                        "Fill": f"{summary['fill']}",
+                    }
+                    table_rows.append(row_bodega)
+                    table_rows.append(row_poly)
+
+                if table_rows:
+                    columns = ["Pair", "Market", "Side", "Profit USD", "Margin", "StartP", "EndP", "Shares", "Cost ADA", "Fee ADA", "AvgPoly",
+                               "Comb ADA", "Comb USD", "Profit ADA", "Fill",
+                               "Inferred B", "ADA/USD Rate"]
+                    df = pd.DataFrame(table_rows, columns=columns).fillna('')
+                    st.dataframe(df)
             else:
                 st.info("No arbitrage opportunities found.")
+
 
 st.markdown("---")
 # Manual Bodega markets for testing
