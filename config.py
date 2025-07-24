@@ -14,9 +14,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 log = logging.getLogger(__name__)
 
 # --- API and Configuration Constants ---
-BODEGA_API = os.getenv("BODEGA_API", "https://v3.bodegamarket.io/api")
-POLY_API = os.getenv("POLY_API", "https://clob.polymarket.com")
-COIN_API = os.getenv("COIN_API", "https://api.coingecko.com/api/v3/simple/price?ids=cardano&vs_currencies=usd")
+BODEGA_API = os.getenv("BODEGA_API")
+POLY_API = os.getenv("POLY_API")
+COIN_API = os.getenv("COIN_API")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # LMSR constants for arbitrage calculation
