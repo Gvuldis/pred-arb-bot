@@ -25,6 +25,9 @@ from streamlit_app.db import (
     add_suggested_match,
     load_suggested_matches,
     remove_suggested_match,
+    save_probability_watch,
+    load_probability_watches,
+    delete_probability_watch,
 )
 # Matching logic
 from matching.fuzzy import (
@@ -104,6 +107,60 @@ if manual_pairs:
             if st.button("❌", key=f"del_pair_{b_id}_{p_id}", help="Delete this pair"):
                 delete_manual_pair(b_id, p_id)
                 st.rerun()
+
+st.markdown("---")
+
+# --- Probability Watch ---
+st.subheader("📈 Probability Watches")
+st.markdown("Monitor a Bodega market against an external probability (e.g., from a bookmaker).")
+
+with st.expander("Add New Probability Watch"):
+    col_watch_1, col_watch_2 = st.columns(2)
+    with col_watch_1:
+        watch_bodega_id = st.text_input("Bodega Market ID", key="watch_bodega_id")
+        watch_desc = st.text_input("Description (optional, for your reference)", key="watch_desc", placeholder="e.g., 'Man City to win PL (Betfair)'")
+    with col_watch_2:
+        watch_prob = st.number_input("Expected 'YES' Probability", min_value=0.0, max_value=1.0, value=0.5, step=0.01, key="watch_prob", format="%.3f")
+        watch_thresh = st.number_input("Alert Deviation Threshold", min_value=0.01, max_value=1.0, value=0.1, step=0.01, key="watch_thresh", format="%.3f", help="Alert if live probability differs by this amount or more (e.g., 0.1 for 10%)")
+
+    if st.button("Add Watch", key="add_watch_btn"):
+        if watch_bodega_id and watch_prob is not None and watch_thresh is not None:
+            save_probability_watch(watch_bodega_id, watch_desc, watch_prob, watch_thresh)
+            st.success(f"Added watch for Bodega market `{watch_bodega_id}`.")
+            st.rerun()
+        else:
+            st.warning("Please provide a Bodega Market ID, probability, and threshold.")
+
+# Display existing watches
+prob_watches = load_probability_watches()
+if prob_watches:
+    st.markdown("**Active Probability Watches:**")
+    for watch in prob_watches:
+        b_id = watch['bodega_id']
+        try:
+            # Fetch market name for better display
+            market_info = b_client.fetch_market_config(b_id)
+            market_name = market_info.get('name', 'N/A')
+        except ValueError:
+            # Market might be inactive
+            market_name = f"<Inactive Market: {b_id}>"
+        except Exception as e:
+            market_name = f"<Error fetching name: {e}>"
+
+        b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
+        
+        c1, c2 = st.columns([8, 1])
+        
+        desc_text = f"– *{watch['description']}*" if watch['description'] else ""
+        c1.markdown(f"""
+        - **[{market_name}]({b_url})** {desc_text}
+          - **Expected Prob:** `{watch['expected_probability']:.3f}`
+          - **Alert Threshold:** `{watch['deviation_threshold']:.3f}`
+        """, unsafe_allow_html=True)
+        
+        if c2.button("🗑️", key=f"del_watch_{b_id}", help="Delete this watch"):
+            delete_probability_watch(b_id)
+            st.rerun()
 
 st.markdown("---")
 

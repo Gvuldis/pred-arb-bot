@@ -103,3 +103,20 @@ class DiscordNotifier:
             f"*Parameters Used: Inferred B=`{inferred_B:.2f}`, ADA/USD=`${ada_usd_rate:.4f}`*"
         )
         self.send(content)
+
+    def notify_probability_deviation(self, market_name: str, bodega_id: str, bodega_api_base: str, expected_prob: float, live_prob: float, deviation: float):
+        """Notify when a Bodega market deviates from its expected probability."""
+        bodega_url = f"{bodega_api_base.replace('/api', '')}/marketDetails?id={bodega_id}"
+
+        content = (
+            f"🎯 **Probability Deviation Alert** 🎯\n\n"
+            f"A significant deviation was detected for a watched market.\n\n"
+            f"**Market:** {market_name}\n"
+            f"**Bodega ID:** `{bodega_id}`\n"
+            f"**Link:** <{bodega_url}>\n\n"
+            f"**Expected Probability:** `{expected_prob:.3f}` ({expected_prob*100:.1f}%)\n"
+            f"**Current Probability:** `{live_prob:.3f}` ({live_prob*100:.1f}%)\n"
+            f"**Deviation:** `{deviation:.3f}` ({deviation*100:.1f}%)\n\n"
+            f"This could indicate a new opportunity or market shift."
+        )
+        self.send(content)

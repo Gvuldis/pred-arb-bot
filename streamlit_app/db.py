@@ -68,6 +68,15 @@ def init_db():
           first_suggested    INTEGER,
           PRIMARY KEY (bodega_id, poly_id)
         )""")
+        # New table for probability watches
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS probability_watches (
+          bodega_id             TEXT PRIMARY KEY,
+          description           TEXT,
+          expected_probability  REAL NOT NULL,
+          deviation_threshold   REAL NOT NULL,
+          created_at            INTEGER
+        )""")
 
         # --- Schema Migration for manual_pairs table ---
         # This section makes the app backwards-compatible with older databases.
@@ -211,4 +220,26 @@ def remove_suggested_match(bodega_id: str, poly_id: str):
             DELETE FROM suggested_matches
             WHERE bodega_id=? AND poly_id=?
         """, (bodega_id, poly_id))
+        conn.commit()
+
+def save_probability_watch(bodega_id: str, description: str, expected_prob: float, deviation_threshold: float):
+    """Saves or updates a probability watch."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO probability_watches
+            (bodega_id, description, expected_probability, deviation_threshold, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (bodega_id, description, expected_prob, deviation_threshold, int(time.time())))
+        conn.commit()
+
+def load_probability_watches() -> list[dict]:
+    """Loads all probability watches."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM probability_watches ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+def delete_probability_watch(bodega_id: str):
+    """Deletes a probability watch from the database."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM probability_watches WHERE bodega_id = ?", (bodega_id,))
         conn.commit()

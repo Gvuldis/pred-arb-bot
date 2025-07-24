@@ -9,6 +9,8 @@ from streamlit_app.db import (
     load_bodega_markets,
     load_polymarkets,
     save_polymarkets,
+    load_probability_watches,
+    delete_probability_watch,
 )
 from matching.fuzzy import (
     fetch_all_polymarket_clob_markets,
@@ -169,6 +171,61 @@ def run_arb_check():
     except Exception as e:
         log.error(f"Arbitrage check job failed entirely: {e}", exc_info=True)
 
+def run_prob_watch_check():
+    """
+    Checks Bodega markets against manually set expected probabilities and sends alerts on deviation.
+    """
+    log.info("Starting periodic probability watch check job")
+    try:
+        watches = load_probability_watches()
+        if not watches:
+            log.info("No probability watches configured. Skipping check.")
+            return
+
+        log.info(f"Found {len(watches)} probability watches to check.")
+        for watch in watches:
+            b_id = watch['bodega_id']
+            try:
+                expected_prob = watch['expected_probability']
+                threshold = watch['deviation_threshold']
+                
+                # Fetch live market data
+                market_config = b_client.fetch_market_config(b_id)
+                market_name = market_config.get('name', f"ID: {b_id}")
+                
+                prices = b_client.fetch_prices(b_id)
+                live_prob = prices.get('yesPrice_ada')
+
+                if live_prob is None:
+                    log.warning(f"Could not get live probability for watch on market {b_id}. Skipping.")
+                    continue
+
+                deviation = abs(live_prob - expected_prob)
+
+                log.info(f"Watch Check ({b_id}): Expected={expected_prob:.3f}, Live={live_prob:.3f}, Deviation={deviation:.3f}, Threshold={threshold:.3f}")
+
+                if deviation >= threshold:
+                    log.warning(f"!!! DEVIATION ALERT for market {b_id} !!!")
+                    if notifier:
+                        notifier.notify_probability_deviation(
+                            market_name=market_name,
+                            bodega_id=b_id,
+                            bodega_api_base=b_client.api_url,
+                            expected_prob=expected_prob,
+                            live_prob=live_prob,
+                            deviation=deviation
+                        )
+
+            except ValueError:
+                # This can happen if fetch_market_config fails because the market is no longer active.
+                log.warning(f"Market {b_id} for probability watch is inactive. Pruning watch.")
+                delete_probability_watch(b_id)
+            except Exception as e:
+                log.error(f"Probability watch check for Bodega ID {b_id} failed: {e}", exc_info=True)
+
+    except Exception as e:
+        log.error(f"Probability watch job failed entirely: {e}", exc_info=True)
+
 if __name__ == "__main__":
     sched = BlockingScheduler(timezone="Europe/Amsterdam")
 
@@ -177,6 +234,7 @@ if __name__ == "__main__":
     fetch_and_save_polymarkets()
     run_auto_match()
     run_arb_check()
+    run_prob_watch_check()
     prune_inactive_pairs()
     log.info("Initial jobs complete.")
 
@@ -188,9 +246,10 @@ if __name__ == "__main__":
     # User-defined schedule
     sched.add_job(run_auto_match, "interval", minutes=30)
     sched.add_job(run_arb_check, "interval", minutes=3)
+    sched.add_job(run_prob_watch_check, "interval", minutes=3)
 
     log.info(
-        "Scheduler started — arb-check every 3min, auto-match every 30min."
+        "Scheduler started — arb-check & prob-watch every 3min, auto-match every 30min."
     )
     try:
         sched.start()
