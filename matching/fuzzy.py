@@ -9,7 +9,6 @@ from rapidfuzz import fuzz
 from typing import List, Tuple, Dict
 from matching.keywords import FOCUS_KEYWORDS
 from datetime import datetime
-from streamlit_app.db import load_manual_bodega_markets
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +103,7 @@ def fetch_all_polymarket_clob_markets(
 
 def fetch_bodega_v3_active_markets(api_url: str) -> List[Dict]:
     """
-    Retrieve active Bodega V3 markets via POST /getMarketConfigs, plus manual test markets.
+    Retrieve active Bodega V3 markets via POST /getMarketConfigs.
     """
     active_api_markets = []
     try:
@@ -127,18 +126,10 @@ def fetch_bodega_v3_active_markets(api_url: str) -> List[Dict]:
                 "options": m.get("options", [])
             })
     except requests.exceptions.RequestException as e:
-        log.warning(f"Could not fetch live Bodega markets: {e}. Using manual markets only.")
+        log.warning(f"Could not fetch live Bodega markets: {e}. Returning empty list.")
 
-    manual_test_markets = load_manual_bodega_markets()
-    
-    # Combine, ensuring no ID collisions (live markets take precedence)
-    final_markets = {m['id']: m for m in active_api_markets}
-    for m in manual_test_markets:
-        if m['id'] not in final_markets:
-            final_markets[m['id']] = m
-
-    log.info(f"Loaded {len(final_markets)} active markets ({len(active_api_markets)} live, {len(manual_test_markets)} manual).")
-    return list(final_markets.values())
+    log.info(f"Loaded {len(active_api_markets)} active markets from API.")
+    return active_api_markets
 
 #––– FULL AUTO-MATCH –––
 

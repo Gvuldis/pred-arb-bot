@@ -67,91 +67,100 @@ def build_arbitrage_table(
     Q_YES: float, Q_NO: float,
     ORDER_BOOK_YES: List[Tuple[float, int]], ORDER_BOOK_NO: List[Tuple[float, int]],
     ADA_TO_USD: float, FEE_RATE: float, B: float,
-) -> Tuple[Optional[int], Dict[str, Any], None]:
+) -> List[Dict[str, Any]]:
     """
-    Finds the best arbitrage opportunity and returns a detailed dictionary.
+    Calculates arbitrage metrics for a given market pair in both directions,
+    regardless of profitability.
     """
-    if not ORDER_BOOK_YES or not ORDER_BOOK_NO or ADA_TO_USD == 0:
-        return None, {"direction": "N/A", "profit_usd": 0, "reason": "Input data invalid (missing order book or ADA price)."}, None
+    if ADA_TO_USD == 0:
+        return []
 
+    opportunities = []
     initial_cost_bod_ada = lmsr_cost(Q_YES, Q_NO, B)
-    best_opp: Dict[str, Any] = {"profit_usd": -1}
 
     # --- Scenario 1: Buy YES on Bodega, hedge with NO on Polymarket ---
-    p_bod_yes_start = compute_price(Q_YES, Q_NO, B)
-    p_poly_no_best_ask = ORDER_BOOK_NO[0][0]
-    implied_poly_yes_price = 1 - p_poly_no_best_ask
+    if ORDER_BOOK_NO:
+        p_bod_yes_start = compute_price(Q_YES, Q_NO, B)
+        p_poly_no_best_ask = ORDER_BOOK_NO[0][0]
+        implied_poly_yes_price = 1 - p_poly_no_best_ask
 
-    if p_bod_yes_start < implied_poly_yes_price:
         x_opt_raw = solve_x_for_price(Q_YES, Q_NO, implied_poly_yes_price, B)
-        if x_opt_raw and x_opt_raw > 0:
+        
+        # If there's a profitable opportunity, use the optimal size.
+        # Otherwise, calculate for a hypothetical 1 share trade to show the negative profit.
+        if x_opt_raw and x_opt_raw > 1:
             x_bod = int(round(x_opt_raw))
-            cost_bod_ada = lmsr_cost(Q_YES + x_bod, Q_NO, B) - initial_cost_bod_ada
-            fee_bod_ada = cost_bod_ada * FEE_RATE
-            p_bod_yes_end = compute_price(Q_YES + x_bod, Q_NO, B)
-            
-            poly_shares_to_buy = int(round(x_bod * ADA_TO_USD))
-            filled_poly, cost_poly_usd, avg_poly_price = consume_order_book(ORDER_BOOK_NO, poly_shares_to_buy)
-            
-            cost_poly_ada = cost_poly_usd / ADA_TO_USD
-            comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
-            comb_usd = comb_ada * ADA_TO_USD
-            profit_ada = x_bod - comb_ada
-            profit_usd = profit_ada * ADA_TO_USD
-            fill_status = filled_poly >= poly_shares_to_buy
-            
-            opp = {
-                "direction": "BUY_YES_BODEGA", "bodega_side": "YES", "polymarket_side": "NO",
-                "p_start": p_bod_yes_start, "p_end": p_bod_yes_end,
-                "bodega_shares": x_bod, "cost_bod_ada": cost_bod_ada, "fee_bod_ada": fee_bod_ada,
-                "polymarket_shares": filled_poly, "cost_poly_usd": cost_poly_usd, "cost_poly_ada": cost_poly_ada,
-                "avg_poly_price": avg_poly_price,
-                "comb_ada": comb_ada, "comb_usd": comb_usd,
-                "profit_ada": profit_ada, "profit_usd": profit_usd,
-                "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
-                "fill": fill_status,
-                "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
-            }
-            if profit_usd > best_opp.get("profit_usd", -1): best_opp = opp
+        else:
+            x_bod = 1 # Use 1 share for non-profitable or tiny opportunities
+
+        cost_bod_ada = lmsr_cost(Q_YES + x_bod, Q_NO, B) - initial_cost_bod_ada
+        fee_bod_ada = cost_bod_ada * FEE_RATE
+        p_bod_yes_end = compute_price(Q_YES + x_bod, Q_NO, B)
+        
+        poly_shares_to_buy = int(round(x_bod * ADA_TO_USD))
+        filled_poly, cost_poly_usd, avg_poly_price = consume_order_book(ORDER_BOOK_NO, poly_shares_to_buy)
+        
+        cost_poly_ada = cost_poly_usd / ADA_TO_USD if ADA_TO_USD > 0 else 0
+        comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
+        comb_usd = comb_ada * ADA_TO_USD
+        
+        profit_ada = x_bod - comb_ada
+        profit_usd = profit_ada * ADA_TO_USD
+        fill_status = filled_poly >= poly_shares_to_buy
+        
+        opp = {
+            "direction": "BUY_YES_BODEGA", "bodega_side": "YES", "polymarket_side": "NO",
+            "p_start": p_bod_yes_start, "p_end": p_bod_yes_end,
+            "bodega_shares": x_bod, "cost_bod_ada": cost_bod_ada, "fee_bod_ada": fee_bod_ada,
+            "polymarket_shares": filled_poly, "cost_poly_usd": cost_poly_usd, "cost_poly_ada": cost_poly_ada,
+            "avg_poly_price": avg_poly_price,
+            "comb_ada": comb_ada, "comb_usd": comb_usd,
+            "profit_ada": profit_ada, "profit_usd": profit_usd,
+            "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
+            "fill": fill_status,
+            "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
+        }
+        opportunities.append(opp)
 
     # --- Scenario 2: Buy NO on Bodega, hedge with YES on Polymarket ---
-    p_bod_no_start = 1 - p_bod_yes_start
-    p_poly_yes_best_ask = ORDER_BOOK_YES[0][0]
-    implied_poly_no_price = 1 - p_poly_yes_best_ask
+    if ORDER_BOOK_YES:
+        p_bod_no_start = 1 - compute_price(Q_YES, Q_NO, B)
+        p_poly_yes_best_ask = ORDER_BOOK_YES[0][0]
+        implied_poly_no_price = 1 - p_poly_yes_best_ask
 
-    if p_bod_no_start < implied_poly_no_price:
         x_opt_raw = solve_x_for_price(Q_NO, Q_YES, implied_poly_no_price, B)
-        if x_opt_raw and x_opt_raw > 0:
+
+        if x_opt_raw and x_opt_raw > 1:
             x_bod = int(round(x_opt_raw))
-            cost_bod_ada = lmsr_cost(Q_YES, Q_NO + x_bod, B) - initial_cost_bod_ada
-            fee_bod_ada = cost_bod_ada * FEE_RATE
-            p_bod_no_end = 1 - compute_price(Q_YES, Q_NO + x_bod, B)
-            
-            poly_shares_to_buy = int(round(x_bod * ADA_TO_USD))
-            filled_poly, cost_poly_usd, avg_poly_price = consume_order_book(ORDER_BOOK_YES, poly_shares_to_buy)
-            
-            cost_poly_ada = cost_poly_usd / ADA_TO_USD
-            comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
-            comb_usd = comb_ada * ADA_TO_USD
-            profit_ada = x_bod - comb_ada
-            profit_usd = profit_ada * ADA_TO_USD
-            fill_status = filled_poly >= poly_shares_to_buy
-            
-            opp = {
-                "direction": "BUY_NO_BODEGA", "bodega_side": "NO", "polymarket_side": "YES",
-                "p_start": p_bod_no_start, "p_end": p_bod_no_end,
-                "bodega_shares": x_bod, "cost_bod_ada": cost_bod_ada, "fee_bod_ada": fee_bod_ada,
-                "polymarket_shares": filled_poly, "cost_poly_usd": cost_poly_usd, "cost_poly_ada": cost_poly_ada,
-                "avg_poly_price": avg_poly_price,
-                "comb_ada": comb_ada, "comb_usd": comb_usd,
-                "profit_ada": profit_ada, "profit_usd": profit_usd,
-                "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
-                "fill": fill_status,
-                "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
-            }
-            if profit_usd > best_opp.get("profit_usd", -1): best_opp = opp
+        else:
+            x_bod = 1
 
-    if "direction" not in best_opp:
-        return None, {"direction": "NONE", "profit_usd": 0.0, "reason": "No opportunity found (no price crossing)."}, None
+        cost_bod_ada = lmsr_cost(Q_YES, Q_NO + x_bod, B) - initial_cost_bod_ada
+        fee_bod_ada = cost_bod_ada * FEE_RATE
+        p_bod_no_end = 1 - compute_price(Q_YES, Q_NO + x_bod, B)
+        
+        poly_shares_to_buy = int(round(x_bod * ADA_TO_USD))
+        filled_poly, cost_poly_usd, avg_poly_price = consume_order_book(ORDER_BOOK_YES, poly_shares_to_buy)
+        
+        cost_poly_ada = cost_poly_usd / ADA_TO_USD if ADA_TO_USD > 0 else 0
+        comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
+        comb_usd = comb_ada * ADA_TO_USD
+        profit_ada = x_bod - comb_ada
+        profit_usd = profit_ada * ADA_TO_USD
+        fill_status = filled_poly >= poly_shares_to_buy
+        
+        opp = {
+            "direction": "BUY_NO_BODEGA", "bodega_side": "NO", "polymarket_side": "YES",
+            "p_start": p_bod_no_start, "p_end": p_bod_no_end,
+            "bodega_shares": x_bod, "cost_bod_ada": cost_bod_ada, "fee_bod_ada": fee_bod_ada,
+            "polymarket_shares": filled_poly, "cost_poly_usd": cost_poly_usd, "cost_poly_ada": cost_poly_ada,
+            "avg_poly_price": avg_poly_price,
+            "comb_ada": comb_ada, "comb_usd": comb_usd,
+            "profit_ada": profit_ada, "profit_usd": profit_usd,
+            "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
+            "fill": fill_status,
+            "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
+        }
+        opportunities.append(opp)
 
-    return best_opp.get("bodega_shares"), best_opp, None
+    return opportunities

@@ -13,7 +13,8 @@ def fetch_and_notify_new_bodega():
     log.info("Starting job to fetch new Bodega markets...")
     try:
         # 1) IDs already in main snapshot
-        existing_ids = {m["market_id"] for m in load_bodega_markets()}
+        # BUGFIX: The dicts from load_bodega_markets have the key 'id', not 'market_id'.
+        existing_ids = {m["id"] for m in load_bodega_markets()}
 
         # 2) Fetch fresh
         fresh_markets = b_client.fetch_markets(force_refresh=True)

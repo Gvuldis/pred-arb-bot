@@ -2,7 +2,9 @@ import sqlite3
 from pathlib import Path
 import time
 from contextlib import contextmanager
+import logging
 
+log = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent.parent / "market_data.db"
 
 @contextmanager
@@ -18,9 +20,14 @@ def get_conn():
             conn.close()
 
 def init_db():
-    """Initializes the database with all necessary tables."""
+    """
+    Initializes the database, creating tables if they don't exist
+    and altering existing tables to add missing columns (migration).
+    """
     with get_conn() as conn:
         cur = conn.cursor()
+        # --- Table Creation ---
+        # Ensure all tables exist with their base schema.
         cur.execute("""
         CREATE TABLE IF NOT EXISTS bodega_markets (
           market_id    TEXT PRIMARY KEY,
@@ -34,6 +41,7 @@ def init_db():
           question     TEXT,
           fetched_at   INTEGER
         )""")
+        # Create the table WITHOUT the new column first, in case it's an old DB.
         cur.execute("""
         CREATE TABLE IF NOT EXISTS manual_pairs (
           bodega_id          TEXT,
@@ -60,13 +68,22 @@ def init_db():
           first_suggested    INTEGER,
           PRIMARY KEY (bodega_id, poly_id)
         )""")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS manual_bodega_markets (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            deadline INTEGER NOT NULL
-        )
-        """)
+
+        # --- Schema Migration for manual_pairs table ---
+        # This section makes the app backwards-compatible with older databases.
+        cur.execute("PRAGMA table_info(manual_pairs)")
+        columns = [row['name'] for row in cur.fetchall()]
+        
+        if 'is_flipped' not in columns:
+            log.info("Running database migration: Adding 'is_flipped' column to 'manual_pairs' table...")
+            # If the column doesn't exist, add it.
+            # The NOT NULL DEFAULT 0 is crucial to set a value for existing rows.
+            cur.execute("""
+            ALTER TABLE manual_pairs
+            ADD COLUMN is_flipped INTEGER NOT NULL DEFAULT 0
+            """)
+            log.info("Migration complete.")
+
         conn.commit()
 
 def save_bodega_markets(markets: list):
@@ -147,18 +164,20 @@ def ignore_bodega_market(market_id: str):
         cur.execute("DELETE FROM new_bodega_markets WHERE market_id=?", (market_id,))
         conn.commit()
 
-def save_manual_pair(bodega_id: str, poly_id: str):
+def save_manual_pair(bodega_id: str, poly_id: str, is_flipped: int = 0):
+    """Saves or updates a manual pair, including its flipped status."""
     with get_conn() as conn:
         conn.execute("""
-            INSERT OR IGNORE INTO manual_pairs (bodega_id, poly_condition_id)
-            VALUES (?, ?)
-        """, (bodega_id, poly_id))
+            INSERT OR REPLACE INTO manual_pairs (bodega_id, poly_condition_id, is_flipped)
+            VALUES (?, ?, ?)
+        """, (bodega_id, poly_id, is_flipped))
         conn.commit()
 
 def load_manual_pairs() -> list[tuple]:
+    """Loads manual pairs including their flipped status."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT bodega_id, poly_condition_id FROM manual_pairs").fetchall()
-        return [(r["bodega_id"], r["poly_condition_id"]) for r in rows]
+        rows = conn.execute("SELECT bodega_id, poly_condition_id, is_flipped FROM manual_pairs").fetchall()
+        return [(r["bodega_id"], r["poly_condition_id"], r["is_flipped"]) for r in rows]
 
 def delete_manual_pair(bodega_id: str, poly_id: str):
     """Deletes a manual pair from the database."""
@@ -192,39 +211,4 @@ def remove_suggested_match(bodega_id: str, poly_id: str):
             DELETE FROM suggested_matches
             WHERE bodega_id=? AND poly_id=?
         """, (bodega_id, poly_id))
-        conn.commit()
-
-def add_manual_bodega_market(market_id: str, name: str, deadline: int):
-    """Adds a manual bodega market for testing fuzzy matching."""
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO manual_bodega_markets (id, name, deadline) VALUES (?, ?, ?)",
-            (market_id, name, deadline)
-        )
-        conn.commit()
-
-def load_manual_bodega_markets() -> list[dict]:
-    """Loads active manual bodega markets from the database."""
-    now_ms = int(time.time() * 1000)
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, name, deadline FROM manual_bodega_markets WHERE deadline > ?",
-            (now_ms,)
-        ).fetchall()
-        # Make sure they have the same structure as real markets
-        return [
-            {
-                "id": r["id"],
-                "name": r["name"],
-                "deadline": r["deadline"],
-                "status": "Active",
-                "options": []
-            }
-            for r in rows
-        ]
-
-def delete_manual_bodega_market(market_id: str):
-    """Deletes a manual bodega market."""
-    with get_conn() as conn:
-        conn.execute("DELETE FROM manual_bodega_markets WHERE id = ?", (market_id,))
         conn.commit()

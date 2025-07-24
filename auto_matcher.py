@@ -8,7 +8,6 @@ from streamlit_app.db import (
     add_suggested_match,
     load_bodega_markets,
     load_polymarkets,
-    load_manual_bodega_markets,
     save_polymarkets,
 )
 from matching.fuzzy import (
@@ -52,13 +51,7 @@ def run_auto_match():
     """
     log.info("Starting periodic auto-match job")
     try:
-        db_bodes = load_bodega_markets()
-        manual_bodes = load_manual_bodega_markets()
-        bodes_map = {m["id"]: m for m in db_bodes}
-        for m in manual_bodes:
-            if m["id"] not in bodes_map:
-                bodes_map[m["id"]] = m
-        bodes = list(bodes_map.values())
+        bodes = load_bodega_markets()
         polys = load_polymarkets()
         log.info(
             f"Loaded {len(bodes)} Bodega markets and {len(polys)} Polymarket markets from DB for matching."
@@ -89,28 +82,38 @@ def run_arb_check():
         opportunities = []
 
         log.info(f"Found {len(manual_pairs)} manual pairs to check.")
-        for b_id, p_id in manual_pairs:
+        for b_id, p_id, is_flipped in manual_pairs:
             try:
                 log.info(f"--- Checking Pair: Bodega ID={b_id}, Polymarket ID={p_id} ---")
+                
                 pool = b_client.fetch_market_config(b_id)
                 p_data = p_client.fetch_market(p_id)
-                bodega_prediction_info = b_client.fetch_prices(b_id) # Fetches from /getPredictionInfo
-                
-                order_book_yes = p_data.get('order_book_yes')
-                order_book_no = p_data.get('order_book_no')
 
-                if not all([pool, p_data, bodega_prediction_info, order_book_yes, order_book_no]):
-                    log.warning(f"Skipping pair ({b_id}, {p_id}) due to missing data (e.g., empty order books, prediction info).")
+                if not p_data.get('active') or p_data.get('closed'):
+                    log.warning(f"Skipping pair ({b_id}, {p_id}) because Polymarket market is not active.")
                     continue
 
-                # Get liquidity shares (q_yes, q_no) from /getPredictionInfo.
+                bodega_prediction_info = b_client.fetch_prices(b_id)
+
+                # Get original order books and outcome names
+                order_book_yes = p_data.get('order_book_yes')
+                order_book_no = p_data.get('order_book_no')
+                poly_outcome_name_yes = p_data.get('outcome_yes', 'YES')
+                poly_outcome_name_no = p_data.get('outcome_no', 'NO')
+
+                # Swap them if the pair is marked as flipped
+                if is_flipped:
+                    log.info(f"Pair ({b_id}, {p_id}) is flipped. Swapping Polymarket outcomes for check.")
+                    order_book_yes, order_book_no = order_book_no, order_book_yes
+                    poly_outcome_name_yes, poly_outcome_name_no = poly_outcome_name_no, poly_outcome_name_yes
+
+                if not all([pool, p_data, bodega_prediction_info, order_book_yes, order_book_no]):
+                    log.warning(f"Skipping pair ({b_id}, {p_id}) due to missing data (e.g., empty order books).")
+                    continue
+
                 Q_YES = bodega_prediction_info.get("yesVolume_ada", 0)
                 Q_NO = bodega_prediction_info.get("noVolume_ada", 0)
-                log.info(f"DBG: Extracted shares for {b_id} from getPredictionInfo: Q_YES={Q_YES}, Q_NO={Q_NO}")
-
-                # --- DYNAMIC B CALCULATION ---
                 p_bod_yes = bodega_prediction_info.get("yesPrice_ada")
-                log.info(f"DBG: Fetched Bodega price for {b_id}: p_bod_yes={p_bod_yes}")
 
                 if not p_bod_yes:
                     log.warning(f"Skipping pair ({b_id}, {p_id}): Could not fetch live Bodega YES price.")
@@ -122,9 +125,8 @@ def run_arb_check():
                 except ValueError as e:
                     log.warning(f"Skipping pair ({b_id}, {p_id}): Could not infer B parameter. Reason: {e}")
                     continue
-                # --- END DYNAMIC B CALCULATION ---
 
-                _, summary, _ = build_arbitrage_table(
+                pair_opportunities = build_arbitrage_table(
                     Q_YES=Q_YES,
                     Q_NO=Q_NO,
                     ORDER_BOOK_YES=order_book_yes,
@@ -134,19 +136,25 @@ def run_arb_check():
                     B=inferred_B
                 )
                 
-                if summary and summary.get("direction") not in ("N/A", "NONE"):
-                    log.info(f"ARBITRAGE CHECK SUMMARY for ({b_id}, {p_id}): {summary}")
+                if not pair_opportunities:
+                    log.info(f"No arbitrage opportunity for pair ({b_id}, {p_id}).")
                 else:
-                    reason = summary.get('reason', 'N/A') if summary else 'N/A'
-                    log.info(f"No arbitrage opportunity for pair ({b_id}, {p_id}). Reason: {reason}")
+                    for summary in pair_opportunities:
+                        # Relabel the polymarket_side in the summary for correct logging and notifications
+                        logical_poly_side = summary['polymarket_side']
+                        if logical_poly_side == 'YES':
+                            summary['polymarket_side'] = poly_outcome_name_yes
+                        else: # 'NO'
+                            summary['polymarket_side'] = poly_outcome_name_no
 
-                profit = summary.get("profit_usd", 0) if summary else 0
-                roi = summary.get("roi", 0) if summary else 0
+                        log.info(f"ARBITRAGE CHECK SUMMARY for ({b_id}, {p_id}): {summary}")
+                        profit = summary.get("profit_usd", 0)
+                        roi = summary.get("roi", 0)
 
-                if profit > 0 and roi > 0.015:
-                    log.info(f"!!!!!! PROFITABLE ARBITRAGE FOUND for pair ({b_id}, {p_id}) !!!!!!")
-                    pair_desc = f"{pool['name']} <-> {p_data['question']}"
-                    opportunities.append((pair_desc, summary, b_id, p_id))
+                        if profit > 0 and roi > 0.015:
+                            log.info(f"!!!!!! PROFITABLE ARBITRAGE FOUND for pair ({b_id}, {p_id}) !!!!!!")
+                            pair_desc = f"{pool['name']} <-> {p_data['question']}"
+                            opportunities.append((pair_desc, summary, b_id, p_id))
 
             except Exception as e:
                 log.error(f"Arbitrage check for pair ({b_id}, {p_id}) failed: {e}", exc_info=True)

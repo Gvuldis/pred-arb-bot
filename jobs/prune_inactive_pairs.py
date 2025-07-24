@@ -16,7 +16,7 @@ def prune_inactive_pairs():
         log.info("No manual pairs to check.")
         return
 
-    for b_id, p_id in manual_pairs:
+    for b_id, p_id, _ in manual_pairs:
         try:
             # 1. Check Bodega market. `fetch_market_config` raises ValueError if not found
             # in the active list from the API.
