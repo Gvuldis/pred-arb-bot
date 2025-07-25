@@ -330,7 +330,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     b_id = opp['b_id']
                     p_id = opp['p_id']
 
-                    if summary.get("profit_usd", 0) > 8 and summary.get("roi", 0) > 0.015:
+                    if summary.get("profit_usd", 0) > 20 and summary.get("roi", 0) > 0.015:
                         if notifier:
                             notifier.notify_arb_opportunity(opp['description'], summary, b_id, p_id, BODEGA_API)
                     
