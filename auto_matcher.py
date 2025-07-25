@@ -153,7 +153,7 @@ def run_arb_check():
                         profit = summary.get("profit_usd", 0)
                         roi = summary.get("roi", 0)
 
-                        if profit > 0 and roi > 0.015:
+                        if profit > 8 and roi > 0.015:
                             log.info(f"!!!!!! PROFITABLE ARBITRAGE FOUND for pair ({b_id}, {p_id}) !!!!!!")
                             pair_desc = f"{pool['name']} <-> {p_data['question']}"
                             opportunities.append((pair_desc, summary, b_id, p_id))
