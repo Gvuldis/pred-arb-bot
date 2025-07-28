@@ -33,7 +33,7 @@ def fetch_and_notify_new_bodega():
         # 4) Notify about all new markets at once, if any
         if notifier and new_markets_found:
             log.info(f"Found {len(new_markets_found)} new Bodega markets. Notifying...")
-            message_parts = ["🆕 **New Bodega Markets Detected**"]
+            message_parts = ["@everyone 🆕 **New Bodega Markets Detected**"]
             for m in new_markets_found:
                 # human-readable deadline
                 ts = datetime.utcfromtimestamp(m["deadline"] / 1000).strftime("%Y-%m-%d %H:%M UTC")

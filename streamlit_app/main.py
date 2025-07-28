@@ -201,8 +201,8 @@ else:
 st.markdown("---")
 
 # Auto-match section
-st.subheader("🔄 Auto-Match Markets")
-if st.button("Run Auto-Match"):
+st.subheader("🔄 Refresh Markets")
+if st.button("Run Refresh"):
     with st.spinner("Fetching markets and running fuzzy matching..."):
         bodes = get_all_bodegas()
         polys = get_all_polymarkets()
