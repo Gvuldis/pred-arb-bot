@@ -11,6 +11,7 @@ from streamlit_app.db import (
     save_polymarkets,
     load_probability_watches,
     delete_probability_watch,
+    get_config_value,
 )
 from matching.fuzzy import (
     fetch_all_polymarket_clob_markets,
@@ -58,6 +59,7 @@ def run_auto_match():
         log.info(
             f"Loaded {len(bodes)} Bodega markets and {len(polys)} Polymarket markets from DB for matching."
         )
+        """
         matches, ignored_count = fuzzy_match_markets(bodes, polys)
         log.info(f"Auto-match found {len(matches)} matches, {ignored_count} ignored")
         if not notifier:
@@ -69,9 +71,10 @@ def run_auto_match():
                 pair = f"{b['name']} <-> {p['question']}"
                 notifier.send(f"👉 Suggested Match: {pair} (score: {score:.1f})")
                 add_suggested_match(b["id"], p["condition_id"], score)
+                """
     except Exception as e:
         log.error(f"Auto-match job failed: {e}", exc_info=True)
-
+        
 
 def run_arb_check():
     """
@@ -226,6 +229,27 @@ def run_prob_watch_check():
     except Exception as e:
         log.error(f"Probability watch job failed entirely: {e}", exc_info=True)
 
+def update_schedules(scheduler):
+    """Checks for config changes from the DB and reschedules jobs accordingly."""
+    log.info("Checking for schedule updates...")
+    try:
+        # --- Arbitrage Check Interval ---
+        # Default to 180 seconds (3 minutes) if not set in the DB.
+        arb_check_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
+        
+        arb_job = scheduler.get_job('arb_check_job')
+        if arb_job:
+            current_interval = arb_job.trigger.interval.total_seconds()
+            if int(current_interval) != arb_check_interval_seconds:
+                log.warning(f"Rescheduling arbitrage check from {current_interval}s to {arb_check_interval_seconds}s.")
+                scheduler.reschedule_job('arb_check_job', trigger='interval', seconds=arb_check_interval_seconds)
+        else:
+            log.error("Could not find job 'arb_check_job' to update.")
+            
+    except Exception as e:
+        log.error(f"Failed to update schedules: {e}", exc_info=True)
+
+
 if __name__ == "__main__":
     sched = BlockingScheduler(timezone="Europe/Amsterdam")
 
@@ -238,18 +262,24 @@ if __name__ == "__main__":
     prune_inactive_pairs()
     log.info("Initial jobs complete.")
 
+    # Get initial interval for arb check from DB, default to 3 minutes
+    initial_arb_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
+
     # Schedule recurring jobs
-    sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15") # Check for new markets every 15 mins
+    sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15")
     sched.add_job(fetch_and_save_polymarkets, "cron", minute="*/15")
-    sched.add_job(prune_inactive_pairs, "cron", hour="*") # Prune once an hour
+    sched.add_job(prune_inactive_pairs, "cron", hour="*")
     
     # User-defined schedule
     sched.add_job(run_auto_match, "interval", minutes=30)
-    sched.add_job(run_arb_check, "interval", minutes=3)
-    sched.add_job(run_prob_watch_check, "interval", minutes=3)
+    sched.add_job(run_arb_check, "interval", seconds=initial_arb_interval_seconds, id="arb_check_job")
+    sched.add_job(run_prob_watch_check, "interval", minutes=3, id="prob_watch_job")
+
+    # Add the schedule updater job. It runs every 15s to check for UI-driven changes.
+    sched.add_job(update_schedules, "interval", seconds=15, args=[sched])
 
     log.info(
-        "Scheduler started — arb-check & prob-watch every 3min, auto-match every 30min."
+        f"Scheduler started. Arb-check interval is initially {initial_arb_interval_seconds}s (changeable via UI)."
     )
     try:
         sched.start()

@@ -77,6 +77,12 @@ def init_db():
           deviation_threshold   REAL NOT NULL,
           created_at            INTEGER
         )""")
+        # New table for application configuration
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_config (
+          key    TEXT PRIMARY KEY,
+          value  TEXT NOT NULL
+        )""")
 
         # --- Schema Migration for manual_pairs table ---
         # This section makes the app backwards-compatible with older databases.
@@ -243,3 +249,21 @@ def delete_probability_watch(bodega_id: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM probability_watches WHERE bodega_id = ?", (bodega_id,))
         conn.commit()
+
+def set_config_value(key: str, value: str):
+    """Sets a configuration value in the app_config table."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO app_config (key, value)
+            VALUES (?, ?)
+        """, (key, str(value)))
+        conn.commit()
+        log.info(f"Set config '{key}' to '{value}'")
+
+def get_config_value(key: str, default: str = None) -> str:
+    """Gets a configuration value from the app_config table."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM app_config WHERE key = ?", (key,)).fetchone()
+        if row:
+            return row['value']
+        return default

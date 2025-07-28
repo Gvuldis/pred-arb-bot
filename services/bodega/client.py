@@ -22,7 +22,7 @@ class BodegaClient:
         
         # --- ADD THESE LINES FOR DEBUGGING ---
         raw_data = resp.json()
-        log.info(f"DBG: Raw Bodega API response: {json.dumps(raw_data, indent=2)}")
+        #log.info(f"DBG: Raw Bodega API response: {json.dumps(raw_data, indent=2)}")
         # --- END DEBUGGING LINES ---
 
         configs = raw_data.get("marketConfigs", [])

@@ -28,6 +28,8 @@ from streamlit_app.db import (
     save_probability_watch,
     load_probability_watches,
     delete_probability_watch,
+    set_config_value,
+    get_config_value,
 )
 # Matching logic
 from matching.fuzzy import (
@@ -204,42 +206,61 @@ if st.button("Run Auto-Match"):
     with st.spinner("Fetching markets and running fuzzy matching..."):
         bodes = get_all_bodegas()
         polys = get_all_polymarkets()
+        """
         matches, ignored_count = fuzzy_match_markets(bodes, polys)
         st.success(f"Auto-match done: {len(matches)} matches found, {ignored_count} pairs ignored.")
         if notifier:
             notifier.notify_auto_match(len(matches), ignored_count)
         for b, p, score in matches:
             add_suggested_match(b["id"], p["condition_id"], score)
+        """
         st.rerun()
-
-st.subheader("🔍 Suggested Matches")
-suggested = load_suggested_matches()
-if not suggested:
-    st.info("No fuzzy-match suggestions at this time.")
-else:
-    for s in suggested:
-        try:
-            b = b_client.fetch_market_config(s["bodega_id"])
-            p = p_client.fetch_market(s["poly_id"])
-        except Exception:
-            remove_suggested_match(s["bodega_id"], s["poly_id"]) # Prune suggestion if market is dead
-            continue
-        score = s["score"]
-        st.markdown(f"**Bodega:** {b.get('name','?')}\n\n**Polymarket:** {p.get('question','?')}\n\nScore: {score:.1f}")
-        cols = st.columns([1,1,4])
-        if cols[0].button("Approve", key=f"approve_{s['bodega_id']}_{s['poly_id']}"):
-            save_manual_pair(s["bodega_id"], s["poly_id"])
-            remove_suggested_match(s["bodega_id"], s["poly_id"])
-            st.success("✅ Match approved")
-            st.rerun()
-        if cols[1].button("Decline", key=f"decline_{s['bodega_id']}_{s['poly_id']}"):
-            remove_suggested_match(s["bodega_id"], s["poly_id"])
-            st.warning("🚫 Match declined")
-            st.rerun()
-st.markdown("---")
 
 # 🚀 Check Arbitrage
 st.subheader("🚀 Check Arbitrage")
+
+# --- New Section for Auto-check frequency ---
+st.markdown("##### Auto-Check Frequency Control")
+st.caption("Control how often the background service checks for arbitrage opportunities.")
+
+# Map display names to seconds
+frequency_options = {
+    "⚡ High (30 seconds)": 30,
+    "👍 Normal (3 minutes)": 180,
+    "🐌 Low (10 minutes)": 600,
+    "⏸️ Paused (1 hour)": 3600,
+}
+# Map seconds back to display names for setting the current selection
+seconds_to_name = {v: k for k, v in frequency_options.items()}
+
+# Get current setting from DB, default to 180 seconds (3 minutes)
+current_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
+current_selection_name = seconds_to_name.get(current_interval_seconds)
+
+# Find the index of the current selection for the radio button. Fallback to index 1 (Normal).
+option_names = list(frequency_options.keys())
+try:
+    current_index = option_names.index(current_selection_name) if current_selection_name else 1
+except ValueError:
+    current_index = 1 # Default to Normal if saved value is somehow not in our options
+
+# Display radio buttons
+selected_frequency_name = st.radio(
+    "Set arbitrage check interval:",
+    option_names,
+    index=current_index,
+    key="arb_frequency_radio",
+    horizontal=True,
+    label_visibility="collapsed"
+)
+
+# If the selection changed, update the DB
+selected_seconds = frequency_options[selected_frequency_name]
+if selected_seconds != current_interval_seconds:
+    set_config_value('arb_check_interval_seconds', str(selected_seconds))
+    st.success(f"Arbitrage check frequency set to: **{selected_frequency_name}**. The background service will update within 15 seconds.")
+    time.sleep(1) # a small delay for user experience
+    st.rerun()
 
 if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking for arbitrage opportunities..."):
