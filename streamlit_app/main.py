@@ -1,3 +1,4 @@
+
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -174,25 +175,36 @@ if not pending:
 else:
     for m in pending:
         st.markdown(f"**{m['market_name']}**  (ID: `{m['market_id']}`)", unsafe_allow_html=True)
-        cols = st.columns([3,1,1])
+        cols = st.columns([3, 1, 1])
+        
         with cols[0]:
-            poly_input = st.text_input("Polymarket Condition ID", key=f"polyid_{m['market_id']}")
+            search_query = st.text_input("Search Polymarket", key=f"poly_search_{m['market_id']}")
+            pm_results = p_client.search_markets(search_query) if search_query else []
+            options = {f'{res["question"]} ({res["condition_id"]})': res["condition_id"] for res in pm_results}
+            selected_label = st.selectbox(
+                "Pick Polymarket market",
+                [""] + list(options.keys()),
+                key=f"poly_select_{m['market_id']}"
+            )
+            poly_condition_id = options.get(selected_label, "")
+
         with cols[1]:
-            st.write("") # spacer
-            st.write("") # spacer
+            st.write("")  # spacer
+            st.write("")  # spacer
             if st.button("Match", key=f"match_{m['market_id']}"):
-                if poly_input:
-                    save_manual_pair(m["market_id"], poly_input)
+                if poly_condition_id:
+                    save_manual_pair(m["market_id"], poly_condition_id)
                     remove_new_bodega_market(m["market_id"])
                     if notifier:
-                        notifier.notify_manual_pair(m['market_id'], poly_input)
-                    st.success(f"Matched Bodega {m['market_name']} ↔ {poly_input}")
+                        notifier.notify_manual_pair(m['market_id'], poly_condition_id)
+                    st.success(f"Matched Bodega {m['market_name']} ↔ {poly_condition_id}")
                     st.rerun()
                 else:
-                    st.error("Enter a Polymarket condition ID before matching.")
+                    st.error("Please search for and select a Polymarket market before matching.")
+        
         with cols[2]:
-            st.write("") # spacer
-            st.write("") # spacer
+            st.write("")  # spacer
+            st.write("")  # spacer
             if st.button("Ignore", key=f"ignore_{m['market_id']}"):
                 ignore_bodega_market(m["market_id"])
                 st.warning(f"Ignored Bodega {m['market_name']}")
