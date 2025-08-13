@@ -87,9 +87,9 @@ def run_arb_check():
         opportunities = []
 
         log.info(f"Found {len(manual_pairs)} manual pairs to check.")
-        for b_id, p_id, is_flipped in manual_pairs:
+        for b_id, p_id, is_flipped, profit_threshold in manual_pairs:
             try:
-                log.info(f"--- Checking Pair: Bodega ID={b_id}, Polymarket ID={p_id} ---")
+                log.info(f"--- Checking Pair: Bodega ID={b_id}, Polymarket ID={p_id} (Profit Threshold: ${profit_threshold}) ---")
                 
                 pool = b_client.fetch_market_config(b_id)
                 p_data = p_client.fetch_market(p_id)
@@ -156,7 +156,7 @@ def run_arb_check():
                         profit = summary.get("profit_usd", 0)
                         roi = summary.get("roi", 0)
 
-                        if profit > 20 and roi > 0.015:
+                        if profit > profit_threshold and roi > 0.015:
                             log.info(f"!!!!!! PROFITABLE ARBITRAGE FOUND for pair ({b_id}, {p_id}) !!!!!!")
                             pair_desc = f"{pool['name']} <-> {p_data['question']}"
                             opportunities.append((pair_desc, summary, b_id, p_id))

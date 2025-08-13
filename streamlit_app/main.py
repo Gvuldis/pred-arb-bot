@@ -1,4 +1,3 @@
-
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -77,7 +76,8 @@ with col3:
     st.write("") # Spacer
     if st.button("Add Pair"):
         if bid and pid:
-            save_manual_pair(bid, pid)
+            # Add with default is_flipped=0 and profit_threshold=25.0
+            save_manual_pair(bid, pid, is_flipped=0, profit_threshold_usd=25.0)
             if notifier:
                 notifier.notify_manual_pair(bid, pid)
             st.success("Pair added to DB!")
@@ -89,29 +89,39 @@ with col3:
 manual_pairs = load_manual_pairs()
 if manual_pairs:
     st.markdown("**Saved Manual Pairs:**")
-    for b_id, p_id, is_flipped in manual_pairs:
-        c1, c2, c3 = st.columns([8, 1, 1])
+    for b_id, p_id, is_flipped, profit_threshold in manual_pairs:
+        # Display link and delete button
+        c1_disp, c2_disp = st.columns([12, 1])
         b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
         p_url = f"https://polymarket.com/event/{p_id}"
-        
-        flip_status_str = " <span style='color: orange; font-weight: bold;'>(Flipped)</span>" if is_flipped else ""
+        c1_disp.markdown(f"• [Bodega]({b_url}) `({b_id})` ↔ [Polymarket]({p_url}) `({p_id})`")
+        if c2_disp.button("❌", key=f"del_pair_{b_id}_{p_id}", help="Delete this pair"):
+            delete_manual_pair(b_id, p_id)
+            st.rerun()
 
-        c1.markdown(f"• [Bodega]({b_url}) `({b_id})` ↔ [Polymarket]({p_url}) `({p_id})`{flip_status_str}", unsafe_allow_html=True)
-        
-        with c2:
-            if st.button("Flip 🔃", key=f"flip_pair_{b_id}_{p_id}", help="Toggle Polymarket outcome order. Use this if 'Yes' on Bodega corresponds to the second outcome on Polymarket."):
-                new_flip_state = 1 - is_flipped # toggle 0 to 1 and 1 to 0
-                save_manual_pair(b_id, p_id, is_flipped=new_flip_state)
-                st.success(f"Pair flipped! Reloading...")
-                time.sleep(1)
-                st.rerun()
-        
-        with c3:
-            if st.button("❌", key=f"del_pair_{b_id}_{p_id}", help="Delete this pair"):
-                delete_manual_pair(b_id, p_id)
-                st.rerun()
+        # Form for updating threshold and flip status
+        with st.form(key=f"form_pair_{b_id}_{p_id}"):
+            c1_form, c2_form, c3_form = st.columns([3, 2, 2])
+            with c1_form:
+                new_threshold = st.number_input(
+                    "Profit Alert ($)",
+                    value=float(profit_threshold),
+                    min_value=0.0,
+                    step=5.0,
+                    help="Set the minimum USD profit to trigger an alert for this pair."
+                )
+            with c2_form:
+                st.write("") # Spacer
+                is_flipped_new = st.checkbox("Flipped", value=bool(is_flipped), help="Check this if 'Yes' on Bodega corresponds to the second outcome (usually 'No') on Polymarket.")
+            with c3_form:
+                st.write("") # Spacer
+                if st.form_submit_button("Update Pair"):
+                    save_manual_pair(b_id, p_id, int(is_flipped_new), float(new_threshold))
+                    st.success(f"Pair {b_id}/{p_id} updated.")
+                    time.sleep(1)
+                    st.rerun()
+        st.markdown("---")
 
-st.markdown("---")
 
 # --- Probability Watch ---
 st.subheader("📈 Probability Watches")
@@ -193,7 +203,7 @@ else:
             st.write("")  # spacer
             if st.button("Match", key=f"match_{m['market_id']}"):
                 if poly_condition_id:
-                    save_manual_pair(m["market_id"], poly_condition_id)
+                    save_manual_pair(m["market_id"], poly_condition_id, is_flipped=0, profit_threshold_usd=25.0)
                     remove_new_bodega_market(m["market_id"])
                     if notifier:
                         notifier.notify_manual_pair(m['market_id'], poly_condition_id)
@@ -284,7 +294,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
             st.warning("No manual pairs to check. Please add some.")
         else:
             prog = st.progress(0)
-            for i, (b_id, p_id, is_flipped) in enumerate(manual_pairs, start=1):
+            for i, (b_id, p_id, is_flipped, profit_threshold) in enumerate(manual_pairs, start=1):
                 try:
                     pool = b_client.fetch_market_config(b_id)
                     pdata = p_client.fetch_market(p_id)
@@ -344,7 +354,8 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                             "description": desc,
                             "summary": best_opportunity,
                             "b_id": b_id,
-                            "p_id": p_id
+                            "p_id": p_id,
+                            "profit_threshold": profit_threshold
                         })
 
                 except Exception as e:
@@ -362,8 +373,9 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     summary = opp['summary']
                     b_id = opp['b_id']
                     p_id = opp['p_id']
+                    profit_threshold = opp['profit_threshold']
 
-                    if summary.get("profit_usd", 0) > 20 and summary.get("roi", 0) > 0.015:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.015:
                         if notifier:
                             notifier.notify_arb_opportunity(opp['description'], summary, b_id, p_id, BODEGA_API)
                     

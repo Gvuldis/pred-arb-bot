@@ -99,6 +99,14 @@ def init_db():
             """)
             log.info("Migration complete.")
 
+        if 'profit_threshold_usd' not in columns:
+            log.info("Running database migration: Adding 'profit_threshold_usd' column to 'manual_pairs' table...")
+            cur.execute("""
+            ALTER TABLE manual_pairs
+            ADD COLUMN profit_threshold_usd REAL NOT NULL DEFAULT 25.0
+            """)
+            log.info("Migration complete.")
+
         conn.commit()
 
 def save_bodega_markets(markets: list):
@@ -179,20 +187,20 @@ def ignore_bodega_market(market_id: str):
         cur.execute("DELETE FROM new_bodega_markets WHERE market_id=?", (market_id,))
         conn.commit()
 
-def save_manual_pair(bodega_id: str, poly_id: str, is_flipped: int = 0):
-    """Saves or updates a manual pair, including its flipped status."""
+def save_manual_pair(bodega_id: str, poly_id: str, is_flipped: int, profit_threshold_usd: float):
+    """Saves or updates a manual pair. This uses INSERT OR REPLACE so all values must be provided on update."""
     with get_conn() as conn:
         conn.execute("""
-            INSERT OR REPLACE INTO manual_pairs (bodega_id, poly_condition_id, is_flipped)
-            VALUES (?, ?, ?)
-        """, (bodega_id, poly_id, is_flipped))
+            INSERT OR REPLACE INTO manual_pairs (bodega_id, poly_condition_id, is_flipped, profit_threshold_usd)
+            VALUES (?, ?, ?, ?)
+        """, (bodega_id, poly_id, is_flipped, profit_threshold_usd))
         conn.commit()
 
 def load_manual_pairs() -> list[tuple]:
-    """Loads manual pairs including their flipped status."""
+    """Loads manual pairs including their flipped status and profit threshold."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT bodega_id, poly_condition_id, is_flipped FROM manual_pairs").fetchall()
-        return [(r["bodega_id"], r["poly_condition_id"], r["is_flipped"]) for r in rows]
+        rows = conn.execute("SELECT bodega_id, poly_condition_id, is_flipped, profit_threshold_usd FROM manual_pairs").fetchall()
+        return [(r["bodega_id"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"]) for r in rows]
 
 def delete_manual_pair(bodega_id: str, poly_id: str):
     """Deletes a manual pair from the database."""
