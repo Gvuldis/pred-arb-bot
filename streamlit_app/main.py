@@ -7,6 +7,7 @@ if str(ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 import logging
+from datetime import datetime, timezone
 
 from config import b_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE, log
 from services.polymarket.model import build_arbitrage_table, infer_b
@@ -174,6 +175,104 @@ if prob_watches:
         if c2.button("🗑️", key=f"del_watch_{b_id}", help="Delete this watch"):
             delete_probability_watch(b_id)
             st.rerun()
+
+st.markdown("---")
+
+# —–– Event Calendars —–––––––––––––––––––––––––––––––––––––––––
+st.subheader("🗓️ Event End Date Calendars")
+
+def format_deadline(ms_timestamp):
+    """Formats a millisecond UTC timestamp into a readable date and time remaining."""
+    if not ms_timestamp or not isinstance(ms_timestamp, (int, float)):
+        return "N/A", "N/A", 0
+    
+    try:
+        dt_object = datetime.fromtimestamp(ms_timestamp / 1000, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return "Invalid Date", "N/A", 0
+
+    # Format for display
+    date_str = dt_object.strftime("%Y-%m-%d %H:%M UTC")
+    
+    # Calculate time remaining
+    time_diff = dt_object - now
+    if time_diff.total_seconds() < 0:
+        remaining_str = "Ended"
+    else:
+        days = time_diff.days
+        hours, remainder = divmod(time_diff.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if days > 0:
+            remaining_str = f"{days}d {hours}h left"
+        elif hours > 0:
+            remaining_str = f"{hours}h {minutes}m left"
+        else:
+            remaining_str = f"{minutes}m left"
+            
+    return date_str, remaining_str, ms_timestamp
+
+# Get all bodega markets and create a lookup map
+all_bodegas_for_calendar = get_all_bodegas()
+bodega_map = {m['id']: {'name': m['name'], 'deadline': m['deadline']} for m in all_bodegas_for_calendar}
+
+# Calendar 1: Matched Markets by End Date (Sorted by soonest to end)
+with st.expander("Matched Markets by End Date", expanded=True):
+    manual_pairs_for_calendar = load_manual_pairs()
+    if not manual_pairs_for_calendar:
+        st.info("No manually matched pairs found.")
+    else:
+        matched_markets = []
+        for b_id, p_id, _, _ in manual_pairs_for_calendar:
+            if b_id in bodega_map:
+                market_info = bodega_map[b_id]
+                deadline_str, remaining_str, deadline_ts = format_deadline(market_info.get('deadline'))
+                matched_markets.append({
+                    "deadline_ts": deadline_ts,
+                    "Market Name": market_info.get('name', 'N/A'),
+                    "End Date": deadline_str,
+                    "Time Remaining": remaining_str,
+                    "Bodega ID": b_id,
+                    "Polymarket ID": p_id
+                })
+        
+        if not matched_markets:
+            st.info("Could not find deadline info for any matched pairs (they may be inactive).")
+        else:
+            # Sort by the actual timestamp, soonest first
+            sorted_matched = sorted(matched_markets, key=lambda x: x['deadline_ts'])
+            # Remove the timestamp column before displaying
+            for m in sorted_matched:
+                del m['deadline_ts']
+
+            df_matched = pd.DataFrame(sorted_matched)
+            st.dataframe(df_matched, use_container_width=True, hide_index=True)
+
+# Calendar 2: All Active Bodega Markets by End Date
+with st.expander("All Active Bodega Markets by End Date"):
+    if not all_bodegas_for_calendar:
+        st.info("No active Bodega markets found.")
+    else:
+        calendar_data = []
+        for market in all_bodegas_for_calendar:
+            deadline_str, remaining_str, deadline_ts = format_deadline(market.get('deadline'))
+            calendar_data.append({
+                "deadline_ts": deadline_ts,
+                "Market Name": market.get('name', 'N/A'),
+                "End Date": deadline_str,
+                "Time Remaining": remaining_str,
+                "ID": market.get('id', 'N/A')
+            })
+        
+        # Sort markets by deadline timestamp
+        sorted_bodegas = sorted(calendar_data, key=lambda x: x['deadline_ts'])
+        # Remove the timestamp column before displaying
+        for m in sorted_bodegas:
+            del m['deadline_ts']
+        
+        df_all = pd.DataFrame(sorted_bodegas)
+        st.dataframe(df_all, use_container_width=True, hide_index=True)
+
 
 st.markdown("---")
 
