@@ -1,8 +1,6 @@
+# portfolio_analyzer/requirements.txt
+streamlit
 pandas
 requests
-streamlit
-rapidfuzz
-apscheduler
-python-dotenv
 blockfrost-python
 python-dateutil
