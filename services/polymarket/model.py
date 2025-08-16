@@ -1,4 +1,3 @@
-
 import math
 import logging
 from scipy.special import logsumexp
@@ -145,7 +144,8 @@ def build_arbitrage_table(
     It iterates through different target prices on Bodega (based on Polymarket's price
     minus an adjustment) to find the most profitable trade, accounting for fees.
     The results of all tested adjustments are logged to the console.
-    Only the most profitable opportunity for each direction is returned.
+    Only the most profitable opportunity for each direction is returned, but now includes
+    the full analysis details for display in the UI.
     """
     if ADA_TO_USD == 0:
         return []
@@ -153,8 +153,8 @@ def build_arbitrage_table(
     all_opportunities = []
     initial_cost_bod_ada = lmsr_cost(Q_YES, Q_NO, B)
     
-    # Test adjustments from 0.00 to 0.10 in 0.01 increments
-    price_adjustments = [i / 100.0 for i in range(0, 11)]
+    # Test adjustments from 0.00 to 0.25 in 0.01 increments
+    price_adjustments = [i / 100.0 for i in range(0, 26)]
 
     # --- Scenario 1: Buy YES on Bodega, hedge with NO on Polymarket ---
     if ORDER_BOOK_NO:
@@ -198,6 +198,7 @@ def build_arbitrage_table(
                     "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
                 }
                 opp.update(best_outcome)
+                opp['analysis_details'] = scenario_1_outcomes  # Attach full analysis
                 all_opportunities.append(opp)
 
     # --- Scenario 2: Buy NO on Bodega, hedge with YES on Polymarket ---
@@ -242,6 +243,7 @@ def build_arbitrage_table(
                     "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
                 }
                 opp.update(best_outcome)
+                opp['analysis_details'] = scenario_2_outcomes # Attach full analysis
                 all_opportunities.append(opp)
 
     return all_opportunities

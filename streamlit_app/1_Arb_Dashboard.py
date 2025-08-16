@@ -1,4 +1,4 @@
-# streamlit_app/1_Arb_Dashboard.py
+
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -186,7 +186,8 @@ def format_deadline(ms_timestamp):
     time_diff = dt_object - now
     if time_diff.total_seconds() < 0: remaining_str = "Ended"
     else:
-        days, hours, remainder = time_diff.days, divmod(time_diff.seconds, 3600)[0], divmod(time_diff.seconds, 3600)[1]
+        days = time_diff.days
+        hours, remainder = divmod(time_diff.seconds, 3600)
         minutes, _ = divmod(remainder, 60)
         if days > 0: remaining_str = f"{days}d {hours}h left"
         elif hours > 0: remaining_str = f"{hours}h {minutes}m left"
@@ -312,36 +313,93 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     except ValueError as e:
                         st.warning(f"Skipping pair ({b_id}, {p_id}): Could not infer B parameter. Reason: {e}")
                         continue
+                    
                     pair_opportunities = build_arbitrage_table(Q_YES=Q_YES, Q_NO=Q_NO, ORDER_BOOK_YES=order_book_yes, ORDER_BOOK_NO=order_book_no, ADA_TO_USD=ada_usd, FEE_RATE=FEE_RATE, B=inferred_B)
+                    
                     if pair_opportunities:
-                        pair_opportunities.sort(key=lambda o: o.get("roi", -float('inf')), reverse=True)
-                        best_opportunity = pair_opportunities[0]
-                        desc = f"{pool['name']} ↔ {pdata['question']}"
-                        logical_poly_side = best_opportunity['polymarket_side']
-                        if logical_poly_side == 'YES': best_opportunity['polymarket_side'] = poly_outcome_name_yes
-                        else: best_opportunity['polymarket_side'] = poly_outcome_name_no
-                        all_opportunities.append({"description": desc, "summary": best_opportunity, "b_id": b_id, "p_id": p_id, "profit_threshold": profit_threshold})
+                        for opportunity in pair_opportunities:
+                            desc = f"{pool['name']} ↔ {pdata['question']}"
+                            logical_poly_side = opportunity['polymarket_side']
+                            if logical_poly_side == 'YES': opportunity['polymarket_side'] = poly_outcome_name_yes
+                            else: opportunity['polymarket_side'] = poly_outcome_name_no
+                            all_opportunities.append({"description": desc, "summary": opportunity, "b_id": b_id, "p_id": p_id, "profit_threshold": profit_threshold})
+
                 except Exception as e:
                     log.exception("Error checking pair %s / %s", b_id, p_id)
                     st.error(f"Error checking pair ({b_id}, {p_id}): {e}")
                 prog.progress(i / len(manual_pairs))
             prog.empty()
+
             if all_opportunities:
                 all_opportunities.sort(key=lambda o: o["summary"].get("roi", -float('inf')), reverse=True)
-                table_rows = []
+                
+                st.subheader("✅ Arbitrage Opportunities Found")
+
                 for opp in all_opportunities:
-                    summary, b_id, p_id, profit_threshold = opp['summary'], opp['b_id'], opp['p_id'], opp['profit_threshold']
+                    summary = opp['summary']
+                    b_id = opp['b_id']
+                    p_id = opp['p_id']
+                    profit_threshold = opp['profit_threshold']
+
+                    # --- Notification Logic ---
                     if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.015:
-                        if notifier: notifier.notify_arb_opportunity(opp['description'], summary, b_id, p_id, BODEGA_API)
-                    row_bodega = {"Pair": opp['description'][:80] + '...' if len(opp['description']) > 80 else opp['description'], "Market": "Bodega", "Side": summary['bodega_side'], "StartP": f"{summary['p_start']:.4f}", "EndP": f"{summary['p_end']:.4f}", "Shares": f"{summary['bodega_shares']}", "Cost ADA": f"{summary['cost_bod_ada']:.2f}", "Fee ADA": f"{summary['fee_bod_ada']:.2f}", "AvgPoly": "", "Comb ADA": f"{summary['comb_ada']:.2f}", "Comb USD": f"{summary['comb_usd']:.2f}", "Profit ADA": f"{summary['profit_ada']:.2f}", "Profit USD": f"{summary['profit_usd']:.2f}", "Margin": f"{summary['roi']*100:.2f}%", "Fill": "", "Inferred B": f"{summary['inferred_B']:.2f}", "ADA/USD Rate": f"${summary['ada_usd_rate']:.4f}"}
-                    row_poly = {"Pair": opp['description'][:80] + '...' if len(opp['description']) > 80 else opp['description'], "Market": "Polymarket", "Side": summary['polymarket_side'], "Shares": f"{summary['polymarket_shares']}", "Cost ADA": f"{summary['cost_poly_ada']:.2f}", "AvgPoly": f"{summary['avg_poly_price']:.4f}", "Fill": f"{summary['fill']}"}
-                    table_rows.extend([row_bodega, row_poly])
-                if table_rows:
-                    columns = ["Pair", "Market", "Side", "Profit USD", "Margin", "StartP", "EndP", "Shares", "Cost ADA", "Fee ADA", "AvgPoly", "Comb ADA", "Comb USD", "Profit ADA", "Fill", "Inferred B", "ADA/USD Rate"]
-                    df = pd.DataFrame(table_rows, columns=columns).fillna('')
-                    def get_row_style(row):
-                        style = 'border-top: 3px solid #555; padding-top: 1em;' if row.name % 2 == 0 else 'padding-bottom: 1em;'
-                        return [style for _ in row]
-                    styler = df.style.apply(get_row_style, axis=1); styler.hide(axis="index")
-                    st.dataframe(styler, use_container_width=True)
-            else: st.info("No arbitrage opportunities found.")
+                        if notifier:
+                            notifier.notify_arb_opportunity(opp['description'], summary, b_id, p_id, BODEGA_API)
+                    
+                    # --- Display Logic ---
+                    st.markdown(f"**Pair:** {opp['description']}")
+                    
+                    main_cols = st.columns(3)
+                    main_cols[0].metric("Total Profit (USD)", f"${summary.get('profit_usd', 0):.2f}")
+                    main_cols[1].metric("Return on Investment (ROI)", f"{summary.get('roi', 0)*100:.2f}%")
+                    main_cols[2].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
+
+                    trade_cols = st.columns(2)
+                    with trade_cols[0]:
+                        st.markdown("##### 1. Bodega Trade")
+                        st.markdown(
+                            f"""
+                            - **Action:** Buy `{summary['bodega_shares']}` **{summary['bodega_side']}** shares
+                            - **Cost:** `₳{summary['cost_bod_ada']:.2f}` (+ `₳{summary['fee_bod_ada']:.2f}` fee)
+                            - **Start Price:** `{summary['p_start']:.4f}` → **End Price:** `{summary['p_end']:.4f}`
+                            """
+                        )
+                    with trade_cols[1]:
+                        st.markdown("##### 2. Polymarket Hedge")
+                        st.markdown(
+                            f"""
+                            - **Action:** Buy `{summary['polymarket_shares']}` **{summary['polymarket_side']}** shares
+                            - **Cost:** `${summary['cost_poly_usd']:.2f}`
+                            - **Avg. Price:** `{summary.get('avg_poly_price', 0):.4f}`
+                            - **Hedge Complete:** {'✅' if summary['fill'] else '❌'}
+                            """
+                        )
+
+                    with st.expander("Show Detailed Price Adjustment Analysis"):
+                        analysis_data = summary.get('analysis_details', [])
+                        if analysis_data:
+                            df_analysis = pd.DataFrame(analysis_data)
+                            df_display = df_analysis[['adjustment', 'p_end', 'bodega_shares', 'profit_usd', 'roi']].copy()
+                            df_display.rename(columns={
+                                'adjustment': 'Adj', 'p_end': 'Target Price',
+                                'bodega_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)'
+                            }, inplace=True)
+                            df_display['ROI (%)'] = df_display['ROI (%)'] * 100
+                            
+                            st.dataframe(
+                                df_display, use_container_width=True, hide_index=True,
+                                column_config={
+                                    "Adj": st.column_config.NumberColumn(format="%.2f"),
+                                    "Target Price": st.column_config.NumberColumn(format="%.4f"),
+                                    "Shares": st.column_config.NumberColumn(format="%d"),
+                                    "Profit ($)": st.column_config.NumberColumn(format="$%.2f"),
+                                    "ROI (%)": st.column_config.NumberColumn(format="%.2f%%")
+                                }
+                            )
+                        else:
+                            st.info("No analysis data available.")
+                    
+                    st.markdown("---")
+
+            else: 
+                st.info("No arbitrage opportunities found.")
