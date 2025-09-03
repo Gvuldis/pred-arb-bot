@@ -1,3 +1,4 @@
+# services/polymarket/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -133,6 +134,55 @@ def _calculate_trade_outcome(
         "p_end": compute_price(q1_bod + x_bod, q2_bod, b)
     }
 
+def _calculate_trade_outcome_fixed_shares(
+    q1_bod: float, q2_bod: float, b: float,
+    order_book_poly: List[Tuple[float, int]],
+    ada_to_usd: float, fee_rate: float,
+    initial_cost_bod_ada: float,
+    shares_to_buy_bodega: int
+) -> Optional[Dict[str, Any]]:
+    """
+    Calculates the outcome of an arbitrage trade for a fixed number of shares.
+    """
+    x_bod = shares_to_buy_bodega
+    if x_bod <= 0:
+        return None
+
+    cost_bod_ada = lmsr_cost(q1_bod + x_bod, q2_bod, b) - initial_cost_bod_ada
+    fee_bod_ada = cost_bod_ada * fee_rate
+    
+    poly_shares_to_buy = int(round(x_bod * ada_to_usd))
+    if poly_shares_to_buy <= 0:
+        poly_shares_to_buy = 1 # At least try to buy 1 to show a valid hedge cost
+        
+    filled_poly, cost_poly_usd, avg_poly_price = consume_order_book(order_book_poly, poly_shares_to_buy)
+    
+    cost_poly_ada = cost_poly_usd / ada_to_usd if ada_to_usd > 0 else 0
+    comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
+    comb_usd = comb_ada * ada_to_usd
+    
+    profit_ada = x_bod - comb_ada
+    profit_usd = profit_ada * ada_to_usd
+    
+    fill_status = filled_poly >= poly_shares_to_buy if poly_shares_to_buy > 0 else True
+
+    return {
+        "bodega_shares": x_bod,
+        "cost_bod_ada": cost_bod_ada,
+        "fee_bod_ada": fee_bod_ada,
+        "polymarket_shares": filled_poly,
+        "cost_poly_usd": cost_poly_usd,
+        "cost_poly_ada": cost_poly_ada,
+        "avg_poly_price": avg_poly_price,
+        "comb_ada": comb_ada,
+        "comb_usd": comb_usd,
+        "profit_ada": profit_ada,
+        "profit_usd": profit_usd,
+        "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
+        "fill": fill_status,
+        "p_end": compute_price(q1_bod + x_bod, q2_bod, b)
+    }
+
 # --- Main function ---
 def build_arbitrage_table(
     Q_YES: float, Q_NO: float,
@@ -141,11 +191,9 @@ def build_arbitrage_table(
 ) -> List[Dict[str, Any]]:
     """
     Calculates arbitrage opportunities by testing various price targets.
-    It iterates through different target prices on Bodega (based on Polymarket's price
-    minus an adjustment) to find the most profitable trade, accounting for fees.
-    The results of all tested adjustments are logged to the console.
-    Only the most profitable opportunity for each direction is returned, but now includes
-    the full analysis details for display in the UI.
+    - If a profitable trade is found, it returns the most profitable one.
+    - If no profitable trade is found, it calculates the profit/loss for a
+      hypothetical 1-share trade to show the current market state.
     """
     if ADA_TO_USD == 0:
         return []
@@ -153,7 +201,6 @@ def build_arbitrage_table(
     all_opportunities = []
     initial_cost_bod_ada = lmsr_cost(Q_YES, Q_NO, B)
     
-    # Test adjustments from 0.00 to 0.25 in 0.01 increments
     price_adjustments = [i / 100.0 for i in range(0, 26)]
 
     # --- Scenario 1: Buy YES on Bodega, hedge with NO on Polymarket ---
@@ -167,7 +214,6 @@ def build_arbitrage_table(
         
         for adj in price_adjustments:
             target_bodega_price = implied_poly_yes_price - adj
-            
             outcome = _calculate_trade_outcome(
                 q1_bod=Q_YES, q2_bod=Q_NO, b=B,
                 order_book_poly=ORDER_BOOK_NO,
@@ -175,31 +221,39 @@ def build_arbitrage_table(
                 initial_cost_bod_ada=initial_cost_bod_ada,
                 target_bodega_price=target_bodega_price
             )
-            
             if outcome:
-                log.info(
-                    f"  Adj: {adj:.2f} | Target P: {target_bodega_price:.4f} | "
-                    f"Shares: {outcome['bodega_shares']:<5} | "
-                    f"Profit: ${outcome['profit_usd']:<8.2f} | "
-                    f"ROI: {outcome['roi']*100:<5.2f}%"
-                )
                 outcome['adjustment'] = adj
                 scenario_1_outcomes.append(outcome)
 
-        if scenario_1_outcomes:
-            best_outcome = max(scenario_1_outcomes, key=lambda x: x['profit_usd'])
-            
-            if best_outcome['profit_usd'] > 0:
-                log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f}")
-                
-                opp = {
-                    "direction": "BUY_YES_BODEGA", "bodega_side": "YES", "polymarket_side": "NO",
-                    "p_start": p_bod_yes_start,
-                    "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
-                }
-                opp.update(best_outcome)
-                opp['analysis_details'] = scenario_1_outcomes  # Attach full analysis
-                all_opportunities.append(opp)
+        best_outcome = max(scenario_1_outcomes, key=lambda x: x['profit_usd']) if scenario_1_outcomes else None
+        
+        final_outcome = None
+        analysis_details = []
+
+        if best_outcome and best_outcome['profit_usd'] > 0:
+            log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f}")
+            final_outcome = best_outcome
+            analysis_details = scenario_1_outcomes
+        else:
+            log.info("No profitable arbitrage for BUY YES Bodega, calculating loss for 1 share.")
+            one_share_outcome = _calculate_trade_outcome_fixed_shares(
+                q1_bod=Q_YES, q2_bod=Q_NO, b=B,
+                order_book_poly=ORDER_BOOK_NO,
+                ada_to_usd=ADA_TO_USD, fee_rate=FEE_RATE,
+                initial_cost_bod_ada=initial_cost_bod_ada,
+                shares_to_buy_bodega=1
+            )
+            final_outcome = one_share_outcome
+        
+        if final_outcome:
+            opp = {
+                "direction": "BUY_YES_BODEGA", "bodega_side": "YES", "polymarket_side": "NO",
+                "p_start": p_bod_yes_start,
+                "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
+            }
+            opp.update(final_outcome)
+            opp['analysis_details'] = analysis_details
+            all_opportunities.append(opp)
 
     # --- Scenario 2: Buy NO on Bodega, hedge with YES on Polymarket ---
     if ORDER_BOOK_YES:
@@ -212,7 +266,6 @@ def build_arbitrage_table(
 
         for adj in price_adjustments:
             target_bodega_price = implied_poly_no_price - adj
-            
             outcome = _calculate_trade_outcome(
                 q1_bod=Q_NO, q2_bod=Q_YES, b=B,
                 order_book_poly=ORDER_BOOK_YES,
@@ -220,30 +273,38 @@ def build_arbitrage_table(
                 initial_cost_bod_ada=initial_cost_bod_ada,
                 target_bodega_price=target_bodega_price
             )
-            
             if outcome:
-                log.info(
-                    f"  Adj: {adj:.2f} | Target P: {target_bodega_price:.4f} | "
-                    f"Shares: {outcome['bodega_shares']:<5} | "
-                    f"Profit: ${outcome['profit_usd']:<8.2f} | "
-                    f"ROI: {outcome['roi']*100:<5.2f}%"
-                )
                 outcome['adjustment'] = adj
                 scenario_2_outcomes.append(outcome)
 
-        if scenario_2_outcomes:
-            best_outcome = max(scenario_2_outcomes, key=lambda x: x['profit_usd'])
-            
-            if best_outcome['profit_usd'] > 0:
-                log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f}")
-                
-                opp = {
-                    "direction": "BUY_NO_BODEGA", "bodega_side": "NO", "polymarket_side": "YES",
-                    "p_start": p_bod_no_start,
-                    "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
-                }
-                opp.update(best_outcome)
-                opp['analysis_details'] = scenario_2_outcomes # Attach full analysis
-                all_opportunities.append(opp)
+        best_outcome = max(scenario_2_outcomes, key=lambda x: x['profit_usd']) if scenario_2_outcomes else None
+        
+        final_outcome = None
+        analysis_details = []
+
+        if best_outcome and best_outcome['profit_usd'] > 0:
+            log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f}")
+            final_outcome = best_outcome
+            analysis_details = scenario_2_outcomes
+        else:
+            log.info("No profitable arbitrage for BUY NO Bodega, calculating loss for 1 share.")
+            one_share_outcome = _calculate_trade_outcome_fixed_shares(
+                q1_bod=Q_NO, q2_bod=Q_YES, b=B,
+                order_book_poly=ORDER_BOOK_YES,
+                ada_to_usd=ADA_TO_USD, fee_rate=FEE_RATE,
+                initial_cost_bod_ada=initial_cost_bod_ada,
+                shares_to_buy_bodega=1
+            )
+            final_outcome = one_share_outcome
+
+        if final_outcome:
+            opp = {
+                "direction": "BUY_NO_BODEGA", "bodega_side": "NO", "polymarket_side": "YES",
+                "p_start": p_bod_no_start,
+                "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
+            }
+            opp.update(final_outcome)
+            opp['analysis_details'] = analysis_details
+            all_opportunities.append(opp)
 
     return all_opportunities

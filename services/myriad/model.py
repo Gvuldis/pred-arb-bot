@@ -118,6 +118,45 @@ def _calculate_trade_outcome_myriad(
         "p_end": compute_price(q1_myr + shares_to_buy_myr, q2_myr, b)[0]
     }
 
+def _calculate_trade_outcome_myriad_fixed_shares(
+    q1_myr: float, q2_myr: float, b: float,
+    order_book_poly: List[Tuple[float, int]],
+    fee_rate: float,
+    initial_cost_myr_usd: float,
+    shares_to_buy_myriad: int
+) -> Optional[Dict[str, Any]]:
+    """
+    Calculates the outcome of an arbitrage trade for a fixed number of shares.
+    """
+    if shares_to_buy_myriad <= 0:
+        return None
+
+    cost_myr_pre_fee = lmsr_cost(q1_myr + shares_to_buy_myriad, q2_myr, b) - initial_cost_myr_usd
+    fee_myr_usd = cost_myr_pre_fee * fee_rate
+    total_cost_myr_usd = cost_myr_pre_fee + fee_myr_usd
+    
+    poly_shares_to_buy = shares_to_buy_myriad
+    filled_poly, cost_poly_usd, avg_poly_price = consume_order_book(order_book_poly, poly_shares_to_buy)
+    
+    total_cost_usd = total_cost_myr_usd + cost_poly_usd
+    
+    payout_usd = shares_to_buy_myriad
+    profit_usd = payout_usd - total_cost_usd
+    
+    return {
+        "myriad_shares": shares_to_buy_myriad,
+        "cost_myr_usd": total_cost_myr_usd,
+        "fee_myr_usd": fee_myr_usd,
+        "polymarket_shares": filled_poly,
+        "cost_poly_usd": cost_poly_usd,
+        "avg_poly_price": avg_poly_price,
+        "total_cost_usd": total_cost_usd,
+        "profit_usd": profit_usd,
+        "roi": profit_usd / total_cost_usd if total_cost_usd > 0 else 0,
+        "fill": filled_poly >= poly_shares_to_buy,
+        "p_end": compute_price(q1_myr + shares_to_buy_myriad, q2_myr, b)[0]
+    }
+
 def build_arbitrage_table_myriad(
     Q1_MYR: float, Q2_MYR: float,
     ORDER_BOOK_POLY_1: List[Tuple[float, int]], ORDER_BOOK_POLY_2: List[Tuple[float, int]],
@@ -138,22 +177,33 @@ def build_arbitrage_table_myriad(
             target_price = implied_poly_1_price - adj
             outcome = _calculate_trade_outcome_myriad(
                 q1_myr=Q1_MYR, q2_myr=Q2_MYR, b=B,
-                order_book_poly=ORDER_BOOK_POLY_2,
-                fee_rate=FEE_RATE,
-                initial_cost_myr_usd=initial_cost_myr_usd,
-                target_myriad_price=target_price
+                order_book_poly=ORDER_BOOK_POLY_2, fee_rate=FEE_RATE,
+                initial_cost_myr_usd=initial_cost_myr_usd, target_myriad_price=target_price
             )
             if outcome:
                 outcome['adjustment'] = adj
                 scenario_1_outcomes.append(outcome)
+        
+        best_outcome = max(scenario_1_outcomes, key=lambda x: x['profit_usd']) if scenario_1_outcomes else None
+        
+        final_outcome = None
+        analysis_details = []
 
-        if scenario_1_outcomes:
-            best_outcome = max(scenario_1_outcomes, key=lambda x: x['profit_usd'])
-            if best_outcome['profit_usd'] > 0:
-                opp = {"direction": "BUY_1_MYRIAD", "myriad_side": 1, "polymarket_side": 2, "p_start": p_myr_1_start, "inferred_B": B}
-                opp.update(best_outcome)
-                opp['analysis_details'] = scenario_1_outcomes
-                all_opportunities.append(opp)
+        if best_outcome and best_outcome['profit_usd'] > 0:
+            final_outcome = best_outcome
+            analysis_details = scenario_1_outcomes
+        else:
+            final_outcome = _calculate_trade_outcome_myriad_fixed_shares(
+                q1_myr=Q1_MYR, q2_myr=Q2_MYR, b=B,
+                order_book_poly=ORDER_BOOK_POLY_2, fee_rate=FEE_RATE,
+                initial_cost_myr_usd=initial_cost_myr_usd, shares_to_buy_myriad=1
+            )
+        
+        if final_outcome:
+            opp = {"direction": "BUY_1_MYRIAD", "myriad_side": 1, "polymarket_side": 2, "p_start": p_myr_1_start, "inferred_B": B}
+            opp.update(final_outcome)
+            opp['analysis_details'] = analysis_details
+            all_opportunities.append(opp)
 
     # --- Scenario 2: Buy Outcome 2 on Myriad, hedge with Outcome 1 on Polymarket ---
     if ORDER_BOOK_POLY_1:
@@ -166,21 +216,32 @@ def build_arbitrage_table_myriad(
             target_price = implied_poly_2_price - adj
             outcome = _calculate_trade_outcome_myriad(
                 q1_myr=Q2_MYR, q2_myr=Q1_MYR, b=B, # Flipped Qs for calculation
-                order_book_poly=ORDER_BOOK_POLY_1,
-                fee_rate=FEE_RATE,
-                initial_cost_myr_usd=initial_cost_myr_usd,
-                target_myriad_price=target_price
+                order_book_poly=ORDER_BOOK_POLY_1, fee_rate=FEE_RATE,
+                initial_cost_myr_usd=initial_cost_myr_usd, target_myriad_price=target_price
             )
             if outcome:
                 outcome['adjustment'] = adj
                 scenario_2_outcomes.append(outcome)
         
-        if scenario_2_outcomes:
-            best_outcome = max(scenario_2_outcomes, key=lambda x: x['profit_usd'])
-            if best_outcome['profit_usd'] > 0:
-                opp = {"direction": "BUY_2_MYRIAD", "myriad_side": 2, "polymarket_side": 1, "p_start": p_myr_2_start, "inferred_B": B}
-                opp.update(best_outcome)
-                opp['analysis_details'] = scenario_2_outcomes
-                all_opportunities.append(opp)
+        best_outcome = max(scenario_2_outcomes, key=lambda x: x['profit_usd']) if scenario_2_outcomes else None
+        
+        final_outcome = None
+        analysis_details = []
+
+        if best_outcome and best_outcome['profit_usd'] > 0:
+            final_outcome = best_outcome
+            analysis_details = scenario_2_outcomes
+        else:
+            final_outcome = _calculate_trade_outcome_myriad_fixed_shares(
+                q1_myr=Q2_MYR, q2_myr=Q1_MYR, b=B, # Flipped
+                order_book_poly=ORDER_BOOK_POLY_1, fee_rate=FEE_RATE,
+                initial_cost_myr_usd=initial_cost_myr_usd, shares_to_buy_myriad=1
+            )
+
+        if final_outcome:
+            opp = {"direction": "BUY_2_MYRIAD", "myriad_side": 2, "polymarket_side": 1, "p_start": p_myr_2_start, "inferred_B": B}
+            opp.update(final_outcome)
+            opp['analysis_details'] = analysis_details
+            all_opportunities.append(opp)
                 
     return all_opportunities

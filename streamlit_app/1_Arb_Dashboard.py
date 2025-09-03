@@ -283,10 +283,10 @@ if selected_seconds != current_interval_seconds:
 if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking all pairs for arbitrage opportunities..."):
         # --- BODEGA CHECK ---
-        st.subheader("Bodega ↔ Polymarket Opportunities")
+        st.subheader("Bodega ↔ Polymarket Results")
         ada_usd = fx_client.get_ada_usd()
         manual_pairs_bodega = load_manual_pairs()
-        bodega_opportunities = []
+        bodega_results = []
         if not manual_pairs_bodega: st.info("No manual Bodega pairs to check.")
         else:
             prog = st.progress(0, text="Checking Bodega pairs...")
@@ -311,23 +311,32 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     pair_opps = build_bodega_arb_table(Q_YES, Q_NO, ob_yes, ob_no, ada_usd, FEE_RATE_BODEGA, inferred_B)
                     
                     for opp in pair_opps:
+                        opp['polymarket_side'] = p_name_yes if opp['polymarket_side'] == 'YES' else p_name_no
+                        bodega_results.append({"description": f"{pool['name']} ↔ {p_data['question']}", "summary": opp, "b_id": b_id, "p_id": p_id, "profit_threshold": profit_threshold})
                         if opp['profit_usd'] > profit_threshold:
-                            opp['polymarket_side'] = p_name_yes if opp['polymarket_side'] == 'YES' else p_name_no
-                            bodega_opportunities.append({"description": f"{pool['name']} ↔ {p_data['question']}", "summary": opp, "b_id": b_id, "p_id": p_id})
                             if notifier: notifier.notify_arb_opportunity(f"{pool['name']} ↔ {p_data['question']}", opp, b_id, p_id, BODEGA_API)
                 except Exception as e:
                     st.error(f"Error checking Bodega pair ({b_id}, {p_id}): {e}")
                 prog.progress(i / len(manual_pairs_bodega))
             prog.empty()
 
-            if bodega_opportunities:
-                st.success(f"Found {len(bodega_opportunities)} Bodega opportunities.")
-                bodega_opportunities.sort(key=lambda o: o["summary"].get("roi", 0), reverse=True)
-                for opp in bodega_opportunities:
+            if bodega_results:
+                st.info(f"Displaying {len(bodega_results)} potential Bodega trades (profitable or not).")
+                bodega_results.sort(key=lambda o: o["summary"].get("profit_usd", 0), reverse=True)
+                for opp in bodega_results:
                     summary = opp['summary']
-                    st.markdown(f"**Pair:** {opp['description']}")
+                    profit = summary.get('profit_usd', 0)
+                    threshold = opp.get('profit_threshold', 25.0)
+
+                    if profit > threshold:
+                        st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE: {opp['description']}</p>**", unsafe_allow_html=True)
+                    elif profit > 0:
+                        st.markdown(f"**<p style='color:orange; font-size: 1.1em;'>SMALL PROFIT: {opp['description']}</p>**", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"**{opp['description']}**")
+                    
                     main_cols = st.columns(3)
-                    main_cols[0].metric("Total Profit (USD)", f"${summary.get('profit_usd', 0):.2f}")
+                    main_cols[0].metric("Potential Profit/Loss (USD)", f"${summary.get('profit_usd', 0):.2f}")
                     main_cols[1].metric("Return on Investment (ROI)", f"{summary.get('roi', 0)*100:.2f}%")
                     main_cols[2].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
                     trade_cols = st.columns(2)
@@ -337,25 +346,28 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     with trade_cols[1]:
                         st.markdown("##### 2. Polymarket Hedge")
                         st.markdown(f"- **Action:** Buy `{summary['polymarket_shares']}` **{summary['polymarket_side']}** shares\n- **Cost:** `${summary['cost_poly_usd']:.2f}`\n- **Avg. Price:** `{summary.get('avg_poly_price', 0):.4f}`\n- **Hedge Complete:** {'✅' if summary['fill'] else '❌'}")
-                    with st.expander("Show Detailed Price Adjustment Analysis"):
-                        analysis_data = summary.get('analysis_details', [])
-                        if analysis_data:
+                    
+                    analysis_data = summary.get('analysis_details', [])
+                    if analysis_data:
+                        with st.expander("Show Detailed Price Adjustment Analysis"):
                             df_analysis = pd.DataFrame(analysis_data)
                             df_display = df_analysis[['adjustment', 'p_end', 'bodega_shares', 'profit_usd', 'roi']].copy()
                             df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'bodega_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)'}, inplace=True)
                             df_display['ROI (%)'] = df_display['ROI (%)'] * 100
                             st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={"Adj": st.column_config.NumberColumn(format="%.2f"), "Target Price": st.column_config.NumberColumn(format="%.4f"), "Shares": st.column_config.NumberColumn(format="%d"), "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), "ROI (%)": st.column_config.NumberColumn(format="%.2f%%")})
+                    else:
+                        st.caption("Profit/Loss based on a 1-share trade.")
                     st.markdown("---")
             else:
                 st.info("No Bodega arbitrage opportunities found.")
 
-        # --- MYRIAD CHECK (NEW) ---
-        st.subheader("Myriad ↔ Polymarket Opportunities")
+        # --- MYRIAD CHECK ---
+        st.subheader("Myriad ↔ Polymarket Results")
         manual_pairs_myriad = load_manual_pairs_myriad()
         if not manual_pairs_myriad: st.info("No manual Myriad pairs to check.")
         else:
             prog_myriad = st.progress(0, text="Checking Myriad pairs...")
-            myriad_opportunities = []
+            myriad_results = []
             for i, (m_slug, p_id, is_flipped, profit_threshold) in enumerate(manual_pairs_myriad, start=1):
                 try:
                     m_data = m_client.fetch_market_details(m_slug)
@@ -377,25 +389,34 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     pair_opps = build_arbitrage_table_myriad(Q1, Q2, obp1, obp2, FEE_RATE_MYRIAD_BUY, inferred_B_myriad)
 
                     for opp in pair_opps:
+                        opp['myriad_side_title'] = m_prices['title1'] if opp['myriad_side'] == 1 else m_prices['title2']
+                        opp['polymarket_side_title'] = p_name1 if opp['polymarket_side'] == 1 else p_name2
+                        pair_desc = f"{m_data['title']} ↔ {p_data['question']}"
+                        myriad_results.append({"description": pair_desc, "summary": opp, "m_slug": m_slug, "p_id": p_id, "profit_threshold": profit_threshold})
                         if opp['profit_usd'] > profit_threshold:
-                            opp['myriad_side_title'] = m_prices['title1'] if opp['myriad_side'] == 1 else m_prices['title2']
-                            opp['polymarket_side_title'] = p_name1 if opp['polymarket_side'] == 1 else p_name2
-                            pair_desc = f"{m_data['title']} ↔ {p_data['question']}"
-                            myriad_opportunities.append({"description": pair_desc, "summary": opp, "m_slug": m_slug, "p_id": p_id})
                             if notifier: notifier.notify_arb_opportunity_myriad(pair_desc, opp, m_slug, p_id)
                 except Exception as e:
                     st.error(f"Error checking Myriad pair ({m_slug}, {p_id}): {e}")
                 prog_myriad.progress(i / len(manual_pairs_myriad))
             prog_myriad.empty()
 
-            if myriad_opportunities:
-                st.success(f"Found {len(myriad_opportunities)} Myriad opportunities.")
-                myriad_opportunities.sort(key=lambda o: o["summary"].get("roi", 0), reverse=True)
-                for opp in myriad_opportunities:
+            if myriad_results:
+                st.info(f"Displaying {len(myriad_results)} potential Myriad trades (profitable or not).")
+                myriad_results.sort(key=lambda o: o["summary"].get("profit_usd", 0), reverse=True)
+                for opp in myriad_results:
                     summary = opp['summary']
-                    st.markdown(f"**Pair:** {opp['description']}")
+                    profit = summary.get('profit_usd', 0)
+                    threshold = opp.get('profit_threshold', 25.0)
+
+                    if profit > threshold:
+                        st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE: {opp['description']}</p>**", unsafe_allow_html=True)
+                    elif profit > 0:
+                        st.markdown(f"**<p style='color:orange; font-size: 1.1em;'>SMALL PROFIT: {opp['description']}</p>**", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"**{opp['description']}**")
+
                     m_cols = st.columns(3)
-                    m_cols[0].metric("Profit (USD)", f"${summary.get('profit_usd', 0):.2f}")
+                    m_cols[0].metric("Potential Profit/Loss (USD)", f"${summary.get('profit_usd', 0):.2f}")
                     m_cols[1].metric("ROI", f"{summary.get('roi', 0)*100:.2f}%")
                     m_cols[2].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
                     t_cols = st.columns(2)
@@ -406,14 +427,16 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         st.markdown("##### 2. Polymarket Hedge")
                         st.markdown(f"- **Action:** Buy `{summary['polymarket_shares']}` **{summary['polymarket_side_title']}** shares\n- **Cost:** `${summary['cost_poly_usd']:.2f}`\n- **Avg. Price:** `{summary.get('avg_poly_price', 0):.4f}`\n- **Hedge Complete:** {'✅' if summary['fill'] else '❌'}")
                     
-                    with st.expander("Show Detailed Price Adjustment Analysis"):
-                        analysis_data = summary.get('analysis_details', [])
-                        if analysis_data:
+                    analysis_data = summary.get('analysis_details', [])
+                    if analysis_data:
+                        with st.expander("Show Detailed Price Adjustment Analysis"):
                             df_analysis = pd.DataFrame(analysis_data)
                             df_display = df_analysis[['adjustment', 'p_end', 'myriad_shares', 'profit_usd', 'roi']].copy()
                             df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'myriad_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)'}, inplace=True)
                             df_display['ROI (%)'] = df_display['ROI (%)'] * 100
                             st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={"Adj": st.column_config.NumberColumn(format="%.2f"), "Target Price": st.column_config.NumberColumn(format="%.4f"), "Shares": st.column_config.NumberColumn(format="%d"), "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), "ROI (%)": st.column_config.NumberColumn(format="%.2f%%")})
+                    else:
+                        st.caption("Profit/Loss based on a 1-share trade.")
                     st.markdown("---")
             else:
                 st.info("No Myriad arbitrage opportunities found.")
