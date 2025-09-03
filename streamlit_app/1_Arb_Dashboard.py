@@ -311,7 +311,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     pair_opps = build_bodega_arb_table(Q_YES, Q_NO, ob_yes, ob_no, ada_usd, FEE_RATE_BODEGA, inferred_B)
                     
                     for opp in pair_opps:
-                        if opp['profit_usd'] > profit_threshold:
+                        if opp['profit_usd'] > 0:
                             opp['polymarket_side'] = p_name_yes if opp['polymarket_side'] == 'YES' else p_name_no
                             bodega_opportunities.append({"description": f"{pool['name']} ↔ {p_data['question']}", "summary": opp, "b_id": b_id, "p_id": p_id})
                             if notifier: notifier.notify_arb_opportunity(f"{pool['name']} ↔ {p_data['question']}", opp, b_id, p_id, BODEGA_API)
@@ -377,7 +377,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     pair_opps = build_arbitrage_table_myriad(Q1, Q2, obp1, obp2, FEE_RATE_MYRIAD_BUY, inferred_B_myriad)
 
                     for opp in pair_opps:
-                        if opp['profit_usd'] > profit_threshold:
+                        if opp['profit_usd'] > 0:
                             opp['myriad_side_title'] = m_prices['title1'] if opp['myriad_side'] == 1 else m_prices['title2']
                             opp['polymarket_side_title'] = p_name1 if opp['polymarket_side'] == 1 else p_name2
                             pair_desc = f"{m_data['title']} ↔ {p_data['question']}"
