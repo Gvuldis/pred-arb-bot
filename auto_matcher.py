@@ -80,7 +80,7 @@ def run_bodega_arb_check():
                 pair_opportunities = build_arbitrage_table(Q_YES, Q_NO, order_book_yes, order_book_no, ada_usd, FEE_RATE_BODEGA, inferred_B)
                 
                 for summary in pair_opportunities:
-                    if summary.get("profit_usd", 0) > 25 and summary.get("roi", 0) > 0.05:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05:
                         summary['polymarket_side'] = poly_outcome_name_yes if summary['polymarket_side'] == 'YES' else poly_outcome_name_no
                         pair_desc = f"{pool['name']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, b_id, p_id))
@@ -132,7 +132,7 @@ def run_myriad_arb_check():
                 pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, FEE_RATE_MYRIAD_BUY, inferred_B)
 
                 for summary in pair_opportunities:
-                    if summary.get("profit_usd", 0) > 25 and summary.get("roi", 0) > 0.05:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05:
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
                         pair_desc = f"{m_data['title']} <-> {p_data['question']}"

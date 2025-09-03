@@ -313,7 +313,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     for opp in pair_opps:
                         opp['polymarket_side'] = p_name_yes if opp['polymarket_side'] == 'YES' else p_name_no
                         bodega_results.append({"description": f"{pool['name']} ↔ {p_data['question']}", "summary": opp, "b_id": b_id, "p_id": p_id, "profit_threshold": profit_threshold})
-                        if opp['profit_usd'] > 25 and opp.get('roi', 0) > 0.05:
+                        if opp['profit_usd'] > profit_threshold and opp.get('roi', 0) > 0.05:
                             if notifier: notifier.notify_arb_opportunity(f"{pool['name']} ↔ {p_data['question']}", opp, b_id, p_id, BODEGA_API)
                 except Exception as e:
                     st.error(f"Error checking Bodega pair ({b_id}, {p_id}): {e}")
@@ -327,9 +327,10 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     summary = opp['summary']
                     profit = summary.get('profit_usd', 0)
                     roi = summary.get('roi', 0)
+                    threshold = opp['profit_threshold']
 
-                    if profit > 25 and roi > 0.05:
-                        st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE: {opp['description']}</p>**", unsafe_allow_html=True)
+                    if profit > threshold and roi > 0.05:
+                        st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
                         st.markdown(f"**<p style='color:orange; font-size: 1.1em;'>SMALL PROFIT: {opp['description']}</p>**", unsafe_allow_html=True)
                     else:
@@ -393,7 +394,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         opp['polymarket_side_title'] = p_name1 if opp['polymarket_side'] == 1 else p_name2
                         pair_desc = f"{m_data['title']} ↔ {p_data['question']}"
                         myriad_results.append({"description": pair_desc, "summary": opp, "m_slug": m_slug, "p_id": p_id, "profit_threshold": profit_threshold})
-                        if opp['profit_usd'] > 25 and opp.get('roi', 0) > 0.05:
+                        if opp['profit_usd'] > profit_threshold and opp.get('roi', 0) > 0.05:
                             if notifier: notifier.notify_arb_opportunity_myriad(pair_desc, opp, m_slug, p_id)
                 except Exception as e:
                     st.error(f"Error checking Myriad pair ({m_slug}, {p_id}): {e}")
@@ -407,9 +408,10 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     summary = opp['summary']
                     profit = summary.get('profit_usd', 0)
                     roi = summary.get('roi', 0)
+                    threshold = opp['profit_threshold']
 
-                    if profit > 25 and roi > 0.05:
-                        st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE: {opp['description']}</p>**", unsafe_allow_html=True)
+                    if profit > threshold and roi > 0.05:
+                        st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
                         st.markdown(f"**<p style='color:orange; font-size: 1.1em;'>SMALL PROFIT: {opp['description']}</p>**", unsafe_allow_html=True)
                     else:
