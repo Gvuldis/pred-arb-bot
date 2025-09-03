@@ -1,8 +1,10 @@
+# config.py
 import os
 import logging
 from dotenv import load_dotenv
 from services.bodega.client import BodegaClient
 from services.polymarket.client import PolymarketClient
+from services.myriad.client import MyriadClient
 from services.fx.client import FXClient
 from notifications.discord import DiscordNotifier
 
@@ -16,18 +18,20 @@ log = logging.getLogger(__name__)
 # --- API and Configuration Constants ---
 BODEGA_API = os.getenv("BODEGA_API")
 POLY_API = os.getenv("POLY_API")
+MYRIAD_API = "https://api-production.polkamarkets.com"
 COIN_API = os.getenv("COIN_API")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-# LMSR constants for arbitrage calculation
-FEE_RATE = 0.04    # 2% fee on Bodega trades
-         # LMSR liquidity parameter
+# Fee constants for arbitrage calculation
+FEE_RATE_BODEGA = 0.04  # 4% total fee on Bodega (2% market + 2% protocol)
+FEE_RATE_MYRIAD_BUY = 0.03 # 3% total fee on Myriad buys
 
 # --- Singleton Clients ---
 # Initializing clients here makes them act as singletons for the application's lifetime.
 log.info("Initializing API clients...")
 b_client = BodegaClient(BODEGA_API)
 p_client = PolymarketClient(POLY_API)
+m_client = MyriadClient(MYRIAD_API)
 fx_client = FXClient(COIN_API)
 
 if not WEBHOOK_URL:

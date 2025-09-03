@@ -1,3 +1,4 @@
+# notifications/discord.py
 import requests
 import logging
 
@@ -29,10 +30,10 @@ class DiscordNotifier:
         except Exception as e:
             log.error(f"An unexpected error occurred while sending Discord notification: {e}")
 
-    def notify_manual_pair(self, bodega_id: str, poly_id: str):
+    def notify_manual_pair(self, platform: str, platform_id: str, poly_id: str):
         """Notify when a manual pair is added."""
-        content = (f"**Manual Pair Added**\n"
-                   f"Bodega ID: `{bodega_id}`\n"
+        content = (f"**Manual Pair Added ({platform.upper()})**\n"
+                   f"{platform.capitalize()} ID: `{platform_id}`\n"
                    f"Polymarket ID: `{poly_id}`")
         self.send(content)
 
@@ -45,44 +46,27 @@ class DiscordNotifier:
 
     def notify_arb_opportunity(self, pair: str, summary: dict, b_id: str, p_id: str, bodega_api_base: str):
         """
-        Notify for each arbitrage opportunity with a detailed execution and payout plan.
+        Notify for each Bodega arbitrage opportunity with a detailed execution and payout plan.
         """
         if not summary or summary.get("profit_usd", 0) <= 0:
-            log.warning(f"Skipping arb notification for '{pair}' due to invalid summary.")
+            log.warning(f"Skipping Bodega arb notification for '{pair}' due to invalid summary.")
             return
-
-        # --- Extract and calculate all necessary financial figures ---
-        profit_usd = summary.get("profit_usd", 0)
-        profit_ada = summary.get("profit_ada", 0)
-        roi = summary.get("roi", 0)
-        ada_usd_rate = summary.get("ada_usd_rate", 0)
-        inferred_B = summary.get("inferred_B", 0)
         
-        # Bodega figures
-        bodega_shares = summary.get("bodega_shares", 0)
-        bodega_side = summary.get("bodega_side", "?")
-        cost_bod_ada = summary.get("cost_bod_ada", 0)
-        fee_bod_ada = summary.get("fee_bod_ada", 0)
-        total_cost_bod_ada = cost_bod_ada + fee_bod_ada
+        profit_usd, profit_ada, roi = summary.get("profit_usd", 0), summary.get("profit_ada", 0), summary.get("roi", 0)
+        ada_usd_rate, inferred_B = summary.get("ada_usd_rate", 0), summary.get("inferred_B", 0)
+        bodega_shares, bodega_side = summary.get("bodega_shares", 0), summary.get("bodega_side", "?")
+        total_cost_bod_ada = summary.get("cost_bod_ada", 0) + summary.get("fee_bod_ada", 0)
         total_cost_bod_usd = total_cost_bod_ada * ada_usd_rate
-
-        # Polymarket figures
-        poly_shares = summary.get("polymarket_shares", 0)
-        poly_side = summary.get("polymarket_side", "?")
+        poly_shares, poly_side = summary.get("polymarket_shares", 0), summary.get("polymarket_side", "?")
         cost_poly_usd = summary.get("cost_poly_usd", 0)
-        cost_poly_ada = cost_poly_usd / ada_usd_rate if ada_usd_rate > 0 else 0
-        
-        # Payout calculations
         payout_bodega_win_usd = bodega_shares * ada_usd_rate
-        payout_poly_win_usd = poly_shares  # Polymarket shares are 1:1 with USDC
+        payout_poly_win_usd = poly_shares
 
-        # --- Construct URLs ---
         bodega_url = f"{bodega_api_base.replace('/api', '')}/marketDetails?id={b_id}"
 
-        # --- Build the rich notification message ---
         content = (
             f"@everyone\n"
-            f"🚀 **Arbitrage Opportunity Detected** 🚀\n\n"
+            f"🚀 **BODEGA Arbitrage Opportunity** 🚀\n\n"
             f"**Pair:** {pair}\n"
             f"**Profit:** `${profit_usd:.2f} USD` (`₳{profit_ada:.2f}`) | **ROI:** `{roi*100:.2f}%`\n\n"
             f"----------------------------------------\n"
@@ -94,13 +78,56 @@ class DiscordNotifier:
             f"   - **Action:** Buy `{poly_shares}` **{poly_side}** shares.\n"
             f"----------------------------------------\n"
             f"**Cost & Payout Analysis (USD):**\n"
-            f"  - **Spent on Bodega:** `${total_cost_bod_usd:.2f}` (`₳{total_cost_bod_ada:.2f}`)\n"
-            f"  - **Spent on Polymarket:** `${cost_poly_usd:.2f}` (`₳{cost_poly_ada:.2f}`)\n\n"
-            f"  - **Total spent:** `${cost_poly_usd+total_cost_bod_usd:.2f}` (`₳{cost_poly_ada+total_cost_bod_ada:.2f}`)\n\n"
+            f"  - **Spent on Bodega:** `${total_cost_bod_usd:.2f}`\n"
+            f"  - **Spent on Polymarket:** `${cost_poly_usd:.2f}`\n"
+            f"  - **Total spent:** `${cost_poly_usd+total_cost_bod_usd:.2f}`\n\n"
             f"  - **Payout if Bodega wins:** `${payout_bodega_win_usd:.2f}`\n"
             f"  - **Payout if Polymarket wins:** `${payout_poly_win_usd:.2f}`\n"
             f"----------------------------------------\n\n"
-            f"*Parameters Used: Inferred B=`{inferred_B:.2f}`, ADA/USD=`${ada_usd_rate:.4f}`*"
+            f"*Parameters: Inferred B=`{inferred_B:.2f}`, ADA/USD=`${ada_usd_rate:.4f}`*"
+        )
+        self.send(content)
+
+    def notify_arb_opportunity_myriad(self, pair: str, summary: dict, m_slug: str, p_id: str):
+        """Notify for each Myriad arbitrage opportunity."""
+        if not summary or summary.get("profit_usd", 0) <= 0:
+            log.warning(f"Skipping Myriad arb notification for '{pair}' due to invalid summary.")
+            return
+
+        profit_usd, roi = summary.get("profit_usd", 0), summary.get("roi", 0)
+        inferred_B = summary.get("inferred_B", 0)
+        myriad_shares, myriad_side = summary.get("myriad_shares", 0), summary.get("myriad_side_title", "?")
+        total_cost_myr_usd = summary.get("cost_myr_usd", 0)
+        poly_shares, poly_side = summary.get("polymarket_shares", 0), summary.get("polymarket_side_title", "?")
+        cost_poly_usd = summary.get("cost_poly_usd", 0)
+        
+        # On Myriad, shares resolve to $1
+        payout_myriad_win_usd = myriad_shares
+        payout_poly_win_usd = poly_shares
+
+        myriad_url = f"https://app.myriad.social/markets/{m_slug}"
+
+        content = (
+            f"@everyone\n"
+            f"🚀 **MYRIAD Arbitrage Opportunity** 🚀\n\n"
+            f"**Pair:** {pair}\n"
+            f"**Profit:** `${profit_usd:.2f} USD` | **ROI:** `{roi*100:.2f}%`\n\n"
+            f"----------------------------------------\n"
+            f"**Execution Plan:**\n"
+            f"**1. Myriad Trade (Execute First!)**\n"
+            f"   - **Action:** Buy `{myriad_shares}` **{myriad_side}** shares.\n"
+            f"   - **Link:** <{myriad_url}>\n\n"
+            f"**2. Polymarket Hedge**\n"
+            f"   - **Action:** Buy `{poly_shares}` **{poly_side}** shares.\n"
+            f"----------------------------------------\n"
+            f"**Cost & Payout Analysis (USD):**\n"
+            f"  - **Spent on Myriad:** `${total_cost_myr_usd:.2f}`\n"
+            f"  - **Spent on Polymarket:** `${cost_poly_usd:.2f}`\n"
+            f"  - **Total spent:** `${cost_poly_usd + total_cost_myr_usd:.2f}`\n\n"
+            f"  - **Payout if Myriad wins:** `${payout_myriad_win_usd:.2f}`\n"
+            f"  - **Payout if Polymarket wins:** `${payout_poly_win_usd:.2f}`\n"
+            f"----------------------------------------\n\n"
+            f"*Parameters Used: Inferred B=`{inferred_B:.2f}`*"
         )
         self.send(content)
 

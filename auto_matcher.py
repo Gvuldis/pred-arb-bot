@@ -1,95 +1,57 @@
+# auto_matcher.py
 import logging
 from apscheduler.schedulers.blocking import BlockingScheduler
-from config import b_client, p_client, fx_client, notifier, FEE_RATE, log
+from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log
 from jobs.fetch_new_bodega import fetch_and_notify_new_bodega
-from jobs.prune_inactive_pairs import prune_inactive_pairs
+from jobs.fetch_new_myriad import fetch_and_notify_new_myriad
+from jobs.prune_inactive_pairs import prune_all_inactive_pairs
 from streamlit_app.db import (
-    load_manual_pairs,
-    add_suggested_match,
-    load_bodega_markets,
-    load_polymarkets,
-    save_polymarkets,
-    load_probability_watches,
-    delete_probability_watch,
-    get_config_value,
+    load_manual_pairs, load_manual_pairs_myriad,
+    load_bodega_markets, load_polymarkets, save_polymarkets,
+    load_probability_watches, delete_probability_watch,
+    get_config_value, load_myriad_markets, save_myriad_markets
 )
-from matching.fuzzy import (
-    fetch_all_polymarket_clob_markets,
-    fuzzy_match_markets,
-)
+from matching.fuzzy import fetch_all_polymarket_clob_markets, fuzzy_match_markets
 from services.polymarket.model import build_arbitrage_table, infer_b
+from services.myriad.model import build_arbitrage_table_myriad
+import services.myriad.model as myriad_model
 
-
-def fetch_and_save_polymarkets():
-    """
-    Fetches all Polymarket markets and saves them to the database.
-    This job ensures the local database is kept up-to-date with active markets.
-    """
-    log.info("Starting job to fetch and save Polymarket markets...")
+def fetch_and_save_markets():
+    """Fetches and saves markets for all platforms."""
+    log.info("Starting job to fetch and save all platform markets...")
     try:
-        fresh_markets = fetch_all_polymarket_clob_markets()
-        if fresh_markets:
-            existing_ids = {m["condition_id"] for m in load_polymarkets()}
-            new_markets = [
-                m for m in fresh_markets if m.get("condition_id") not in existing_ids
-            ]
-            save_polymarkets(fresh_markets)
-            log.info(
-                f"Saved/updated {len(fresh_markets)} Polymarket markets in the database."
-            )
-            if new_markets:
-                log.info(f"Found {len(new_markets)} new Polymarket markets.")
-            else:
-                log.info("No new Polymarket markets found.")
+        # Polymarket
+        fresh_poly_markets = fetch_all_polymarket_clob_markets()
+        if fresh_poly_markets:
+            save_polymarkets(fresh_poly_markets)
+            log.info(f"Saved/updated {len(fresh_poly_markets)} Polymarket markets.")
         else:
             log.info("No active Polymarket markets found from API.")
-    except Exception as e:
-        log.error(f"Failed to fetch and save Polymarket markets: {e}", exc_info=True)
-
-
-def run_auto_match():
-    """
-    Loads markets from the database, finds potential matches using
-    fuzzy string matching, and records them for manual review.
-    """
-    log.info("Starting periodic auto-match job")
-    try:
-        bodes = load_bodega_markets()
-        polys = load_polymarkets()
-        log.info(
-            f"Loaded {len(bodes)} Bodega markets and {len(polys)} Polymarket markets from DB for matching."
-        )
-        """
-        matches, ignored_count = fuzzy_match_markets(bodes, polys)
-        log.info(f"Auto-match found {len(matches)} matches, {ignored_count} ignored")
-        if not notifier:
-            log.warning("Discord notifier not available. Skipping notifications.")
-            return
-        if matches:
-            notifier.notify_auto_match(len(matches), ignored_count)
-            for b, p, score in matches:
-                pair = f"{b['name']} <-> {p['question']}"
-                notifier.send(f"👉 Suggested Match: {pair} (score: {score:.1f})")
-                add_suggested_match(b["id"], p["condition_id"], score)
-                """
-    except Exception as e:
-        log.error(f"Auto-match job failed: {e}", exc_info=True)
         
+        # Myriad
+        fresh_myriad_markets = m_client.fetch_markets()
+        if fresh_myriad_markets:
+            save_myriad_markets(fresh_myriad_markets)
+            log.info(f"Saved/updated {len(fresh_myriad_markets)} Myriad markets.")
+        else:
+            log.info("No active Myriad markets found from API.")
+            
+    except Exception as e:
+        log.error(f"Failed to fetch and save all markets: {e}", exc_info=True)
 
-def run_arb_check():
-    """
-    Checks for arbitrage opportunities in manually confirmed pairs.
-    """
-    log.info("Starting periodic arbitrage-check job")
+
+def run_bodega_arb_check():
+    """Checks for arbitrage opportunities in Bodega-Polymarket pairs."""
+    log.info("--- Starting BODEGA arbitrage-check job ---")
     try:
         ada_usd = fx_client.get_ada_usd()
         manual_pairs = load_manual_pairs()
         opportunities = []
 
-        log.info(f"Found {len(manual_pairs)} manual pairs to check.")
+        log.info(f"Found {len(manual_pairs)} manual Bodega pairs to check.")
         for b_id, p_id, is_flipped, profit_threshold in manual_pairs:
             try:
-                log.info(f"--- Checking Pair: Bodega ID={b_id}, Polymarket ID={p_id} (Profit Threshold: ${profit_threshold}) ---")
+                log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
                 pool = b_client.fetch_market_config(b_id)
                 p_data = p_client.fetch_market(p_id)
@@ -99,85 +61,102 @@ def run_arb_check():
                     continue
 
                 bodega_prediction_info = b_client.fetch_prices(b_id)
+                order_book_yes, order_book_no = p_data.get('order_book_yes'), p_data.get('order_book_no')
+                poly_outcome_name_yes, poly_outcome_name_no = p_data.get('outcome_yes', 'YES'), p_data.get('outcome_no', 'NO')
 
-                # Get original order books and outcome names
-                order_book_yes = p_data.get('order_book_yes')
-                order_book_no = p_data.get('order_book_no')
-                poly_outcome_name_yes = p_data.get('outcome_yes', 'YES')
-                poly_outcome_name_no = p_data.get('outcome_no', 'NO')
-
-                # Swap them if the pair is marked as flipped
                 if is_flipped:
-                    log.info(f"Pair ({b_id}, {p_id}) is flipped. Swapping Polymarket outcomes for check.")
                     order_book_yes, order_book_no = order_book_no, order_book_yes
                     poly_outcome_name_yes, poly_outcome_name_no = poly_outcome_name_no, poly_outcome_name_yes
 
                 if not all([pool, p_data, bodega_prediction_info, order_book_yes, order_book_no]):
-                    log.warning(f"Skipping pair ({b_id}, {p_id}) due to missing data (e.g., empty order books).")
+                    log.warning(f"Skipping pair ({b_id}, {p_id}) due to missing data.")
                     continue
 
-                Q_YES = bodega_prediction_info.get("yesVolume_ada", 0)
-                Q_NO = bodega_prediction_info.get("noVolume_ada", 0)
+                Q_YES, Q_NO = bodega_prediction_info.get("yesVolume_ada", 0), bodega_prediction_info.get("noVolume_ada", 0)
                 p_bod_yes = bodega_prediction_info.get("yesPrice_ada")
+                if p_bod_yes is None: continue
 
-                if not p_bod_yes:
-                    log.warning(f"Skipping pair ({b_id}, {p_id}): Could not fetch live Bodega YES price.")
-                    continue
+                inferred_B = infer_b(Q_YES, Q_NO, p_bod_yes)
+                pair_opportunities = build_arbitrage_table(Q_YES, Q_NO, order_book_yes, order_book_no, ada_usd, FEE_RATE_BODEGA, inferred_B)
                 
-                try:
-                    inferred_B = infer_b(Q_YES, Q_NO, p_bod_yes)
-                    log.info(f"Inferred B for market {b_id}: {inferred_B:.2f}")
-                except ValueError as e:
-                    log.warning(f"Skipping pair ({b_id}, {p_id}): Could not infer B parameter. Reason: {e}")
-                    continue
-
-                pair_opportunities = build_arbitrage_table(
-                    Q_YES=Q_YES,
-                    Q_NO=Q_NO,
-                    ORDER_BOOK_YES=order_book_yes,
-                    ORDER_BOOK_NO=order_book_no,
-                    ADA_TO_USD=ada_usd,
-                    FEE_RATE=FEE_RATE,
-                    B=inferred_B
-                )
-                
-                if not pair_opportunities:
-                    log.info(f"No arbitrage opportunity for pair ({b_id}, {p_id}).")
-                else:
-                    for summary in pair_opportunities:
-                        # Relabel the polymarket_side in the summary for correct logging and notifications
-                        logical_poly_side = summary['polymarket_side']
-                        if logical_poly_side == 'YES':
-                            summary['polymarket_side'] = poly_outcome_name_yes
-                        else: # 'NO'
-                            summary['polymarket_side'] = poly_outcome_name_no
-
-                        log.info(f"ARBITRAGE CHECK SUMMARY for ({b_id}, {p_id}): {summary}")
-                        profit = summary.get("profit_usd", 0)
-                        roi = summary.get("roi", 0)
-
-                        if profit > profit_threshold and roi > 0.015:
-                            log.info(f"!!!!!! PROFITABLE ARBITRAGE FOUND for pair ({b_id}, {p_id}) !!!!!!")
-                            pair_desc = f"{pool['name']} <-> {p_data['question']}"
-                            opportunities.append((pair_desc, summary, b_id, p_id))
+                for summary in pair_opportunities:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.015:
+                        summary['polymarket_side'] = poly_outcome_name_yes if summary['polymarket_side'] == 'YES' else poly_outcome_name_no
+                        pair_desc = f"{pool['name']} <-> {p_data['question']}"
+                        opportunities.append((pair_desc, summary, b_id, p_id))
 
             except Exception as e:
-                log.error(f"Arbitrage check for pair ({b_id}, {p_id}) failed: {e}", exc_info=True)
+                log.error(f"Bodega arb check for pair ({b_id}, {p_id}) failed: {e}", exc_info=True)
 
         if notifier and opportunities:
             for pair, summary, b_id, p_id in opportunities:
                 notifier.notify_arb_opportunity(pair, summary, b_id, p_id, b_client.api_url)
         
-        if not opportunities:
-            log.info("No arbitrage opportunities meeting profit/ROI threshold found this cycle.")
+        log.info(f"Bodega arb check finished. Found {len(opportunities)} opportunities.")
 
     except Exception as e:
-        log.error(f"Arbitrage check job failed entirely: {e}", exc_info=True)
+        log.error(f"Bodega arbitrage check job failed entirely: {e}", exc_info=True)
+
+def run_myriad_arb_check():
+    """Checks for arbitrage opportunities in Myriad-Polymarket pairs."""
+    log.info("--- Starting MYRIAD arbitrage-check job ---")
+    try:
+        manual_pairs = load_manual_pairs_myriad()
+        opportunities = []
+
+        log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
+        for m_slug, p_id, is_flipped, profit_threshold in manual_pairs:
+            try:
+                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
+
+                m_data = m_client.fetch_market_details(m_slug)
+                p_data = p_client.fetch_market(p_id)
+
+                if not all([m_data, p_data]) or m_data.get('state') != 'open' or not p_data.get('active') or p_data.get('closed'):
+                    log.warning(f"Skipping pair ({m_slug}, {p_id}) due to inactive/missing market data.")
+                    continue
+                
+                m_prices = m_client.fetch_prices(m_slug)
+                if not m_prices: continue
+                
+                Q1, Q2 = m_prices['shares1'], m_prices['shares2']
+                P1 = m_prices['price1']
+                
+                inferred_B = myriad_model.infer_b(Q1, Q2, P1)
+                
+                order_book_poly_1, order_book_poly_2 = p_data.get('order_book_yes'), p_data.get('order_book_no')
+                
+                if is_flipped:
+                    order_book_poly_1, order_book_poly_2 = order_book_poly_2, order_book_poly_1
+                
+                pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, FEE_RATE_MYRIAD_BUY, inferred_B)
+
+                for summary in pair_opportunities:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.015:
+                        summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
+                        summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
+                        pair_desc = f"{m_data['title']} <-> {p_data['question']}"
+                        opportunities.append((pair_desc, summary, m_slug, p_id))
+
+            except Exception as e:
+                log.error(f"Myriad arb check for pair ({m_slug}, {p_id}) failed: {e}", exc_info=True)
+
+        if notifier and opportunities:
+            for pair, summary, m_slug, p_id in opportunities:
+                notifier.notify_arb_opportunity_myriad(pair, summary, m_slug, p_id)
+        
+        log.info(f"Myriad arb check finished. Found {len(opportunities)} opportunities.")
+
+    except Exception as e:
+        log.error(f"Myriad arbitrage check job failed entirely: {e}", exc_info=True)
+
+
+def run_all_arb_checks():
+    run_bodega_arb_check()
+    run_myriad_arb_check()
 
 def run_prob_watch_check():
-    """
-    Checks Bodega markets against manually set expected probabilities and sends alerts on deviation.
-    """
+    """Checks Bodega markets against manually set expected probabilities."""
     log.info("Starting periodic probability watch check job")
     try:
         watches = load_probability_watches()
@@ -185,47 +164,27 @@ def run_prob_watch_check():
             log.info("No probability watches configured. Skipping check.")
             return
 
-        log.info(f"Found {len(watches)} probability watches to check.")
         for watch in watches:
             b_id = watch['bodega_id']
             try:
-                expected_prob = watch['expected_probability']
-                threshold = watch['deviation_threshold']
-                
-                # Fetch live market data
-                market_config = b_client.fetch_market_config(b_id)
-                market_name = market_config.get('name', f"ID: {b_id}")
-                
                 prices = b_client.fetch_prices(b_id)
                 live_prob = prices.get('yesPrice_ada')
+                if live_prob is None: continue
 
-                if live_prob is None:
-                    log.warning(f"Could not get live probability for watch on market {b_id}. Skipping.")
-                    continue
-
-                deviation = abs(live_prob - expected_prob)
-
-                log.info(f"Watch Check ({b_id}): Expected={expected_prob:.3f}, Live={live_prob:.3f}, Deviation={deviation:.3f}, Threshold={threshold:.3f}")
-
-                if deviation >= threshold:
-                    log.warning(f"!!! DEVIATION ALERT for market {b_id} !!!")
+                deviation = abs(live_prob - watch['expected_probability'])
+                if deviation >= watch['deviation_threshold']:
+                    market_config = b_client.fetch_market_config(b_id)
                     if notifier:
                         notifier.notify_probability_deviation(
-                            market_name=market_name,
-                            bodega_id=b_id,
-                            bodega_api_base=b_client.api_url,
-                            expected_prob=expected_prob,
-                            live_prob=live_prob,
-                            deviation=deviation
+                            market_name=market_config.get('name', f"ID: {b_id}"), bodega_id=b_id,
+                            bodega_api_base=b_client.api_url, expected_prob=watch['expected_probability'],
+                            live_prob=live_prob, deviation=deviation
                         )
-
             except ValueError:
-                # This can happen if fetch_market_config fails because the market is no longer active.
                 log.warning(f"Market {b_id} for probability watch is inactive. Pruning watch.")
                 delete_probability_watch(b_id)
             except Exception as e:
-                log.error(f"Probability watch check for Bodega ID {b_id} failed: {e}", exc_info=True)
-
+                log.error(f"Prob watch for Bodega ID {b_id} failed: {e}", exc_info=True)
     except Exception as e:
         log.error(f"Probability watch job failed entirely: {e}", exc_info=True)
 
@@ -233,54 +192,37 @@ def update_schedules(scheduler):
     """Checks for config changes from the DB and reschedules jobs accordingly."""
     log.info("Checking for schedule updates...")
     try:
-        # --- Arbitrage Check Interval ---
-        # Default to 180 seconds (3 minutes) if not set in the DB.
         arb_check_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
-        
         arb_job = scheduler.get_job('arb_check_job')
-        if arb_job:
-            current_interval = arb_job.trigger.interval.total_seconds()
-            if int(current_interval) != arb_check_interval_seconds:
-                log.warning(f"Rescheduling arbitrage check from {current_interval}s to {arb_check_interval_seconds}s.")
-                scheduler.reschedule_job('arb_check_job', trigger='interval', seconds=arb_check_interval_seconds)
-        else:
-            log.error("Could not find job 'arb_check_job' to update.")
-            
+        if arb_job and int(arb_job.trigger.interval.total_seconds()) != arb_check_interval_seconds:
+            log.warning(f"Rescheduling arbitrage check from {arb_job.trigger.interval.total_seconds()}s to {arb_check_interval_seconds}s.")
+            scheduler.reschedule_job('arb_check_job', trigger='interval', seconds=arb_check_interval_seconds)
     except Exception as e:
         log.error(f"Failed to update schedules: {e}", exc_info=True)
 
-
 if __name__ == "__main__":
-    sched = BlockingScheduler(timezone="Europe/Amsterdam")
+    sched = BlockingScheduler(timezone="UTC")
 
     log.info("Running initial jobs on startup...")
     fetch_and_notify_new_bodega()
-    fetch_and_save_polymarkets()
-    run_auto_match()
-    run_arb_check()
+    fetch_and_notify_new_myriad()
+    fetch_and_save_markets()
+    run_all_arb_checks()
     run_prob_watch_check()
-    prune_inactive_pairs()
+    prune_all_inactive_pairs()
     log.info("Initial jobs complete.")
 
-    # Get initial interval for arb check from DB, default to 3 minutes
     initial_arb_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
 
-    # Schedule recurring jobs
     sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15")
-    sched.add_job(fetch_and_save_polymarkets, "cron", minute="*/15")
-    sched.add_job(prune_inactive_pairs, "cron", hour="*")
-    
-    # User-defined schedule
-    sched.add_job(run_auto_match, "interval", minutes=30)
-    sched.add_job(run_arb_check, "interval", seconds=initial_arb_interval_seconds, id="arb_check_job")
+    sched.add_job(fetch_and_notify_new_myriad, "cron", minute="*/15")
+    sched.add_job(fetch_and_save_markets, "cron", minute="*/15")
+    sched.add_job(prune_all_inactive_pairs, "cron", hour="*")
+    sched.add_job(run_all_arb_checks, "interval", seconds=initial_arb_interval_seconds, id="arb_check_job")
     sched.add_job(run_prob_watch_check, "interval", minutes=3, id="prob_watch_job")
-
-    # Add the schedule updater job. It runs every 15s to check for UI-driven changes.
     sched.add_job(update_schedules, "interval", seconds=15, args=[sched])
 
-    log.info(
-        f"Scheduler started. Arb-check interval is initially {initial_arb_interval_seconds}s (changeable via UI)."
-    )
+    log.info(f"Scheduler started. Arb-check interval: {initial_arb_interval_seconds}s.")
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
