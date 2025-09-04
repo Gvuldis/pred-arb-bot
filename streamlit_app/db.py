@@ -124,6 +124,16 @@ def init_db():
         if 'profit_threshold_usd' not in columns:
             log.info("Migration: Adding 'profit_threshold_usd' to 'manual_pairs'.")
             cur.execute("ALTER TABLE manual_pairs ADD COLUMN profit_threshold_usd REAL NOT NULL DEFAULT 25.0")
+        if 'end_date_override' not in columns:
+            log.info("Migration: Adding 'end_date_override' to 'manual_pairs'.")
+            cur.execute("ALTER TABLE manual_pairs ADD COLUMN end_date_override INTEGER")
+
+        # --- Schema Migration for manual_pairs_myriad table ---
+        cur.execute("PRAGMA table_info(manual_pairs_myriad)")
+        columns_myriad = [row['name'] for row in cur.fetchall()]
+        if 'end_date_override' not in columns_myriad:
+            log.info("Migration: Adding 'end_date_override' to 'manual_pairs_myriad'.")
+            cur.execute("ALTER TABLE manual_pairs_myriad ADD COLUMN end_date_override INTEGER")
 
         conn.commit()
         log.info("Database initialization/migration check complete.")
@@ -211,30 +221,30 @@ def load_polymarkets() -> list:
         return [{"condition_id": r["condition_id"], "question": r["question"], "fetched_at": r["fetched_at"]} for r in rows]
 
 # --- Pairing Functions ---
-def save_manual_pair(bodega_id: str, poly_id: str, is_flipped: int, profit_threshold_usd: float):
+def save_manual_pair(bodega_id: str, poly_id: str, is_flipped: int, profit_threshold_usd: float, end_date_override: int = None):
     with get_conn() as conn:
-        conn.execute("INSERT OR REPLACE INTO manual_pairs (bodega_id, poly_condition_id, is_flipped, profit_threshold_usd) VALUES (?, ?, ?, ?)", (bodega_id, poly_id, is_flipped, profit_threshold_usd))
+        conn.execute("INSERT OR REPLACE INTO manual_pairs (bodega_id, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override) VALUES (?, ?, ?, ?, ?)", (bodega_id, poly_id, is_flipped, profit_threshold_usd, end_date_override))
         conn.commit()
 
 def load_manual_pairs() -> list[tuple]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT bodega_id, poly_condition_id, is_flipped, profit_threshold_usd FROM manual_pairs").fetchall()
-        return [(r["bodega_id"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"]) for r in rows]
+        rows = conn.execute("SELECT bodega_id, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override FROM manual_pairs").fetchall()
+        return [(r["bodega_id"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"], r["end_date_override"]) for r in rows]
 
 def delete_manual_pair(bodega_id: str, poly_id: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM manual_pairs WHERE bodega_id = ? AND poly_condition_id = ?", (bodega_id, poly_id))
         conn.commit()
 
-def save_manual_pair_myriad(myriad_slug: str, poly_id: str, is_flipped: int, profit_threshold_usd: float):
+def save_manual_pair_myriad(myriad_slug: str, poly_id: str, is_flipped: int, profit_threshold_usd: float, end_date_override: int = None):
     with get_conn() as conn:
-        conn.execute("INSERT OR REPLACE INTO manual_pairs_myriad (myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd) VALUES (?, ?, ?, ?)", (myriad_slug, poly_id, is_flipped, profit_threshold_usd))
+        conn.execute("INSERT OR REPLACE INTO manual_pairs_myriad (myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override) VALUES (?, ?, ?, ?, ?)", (myriad_slug, poly_id, is_flipped, profit_threshold_usd, end_date_override))
         conn.commit()
 
 def load_manual_pairs_myriad() -> list[tuple]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd FROM manual_pairs_myriad").fetchall()
-        return [(r["myriad_slug"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"]) for r in rows]
+        rows = conn.execute("SELECT myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override FROM manual_pairs_myriad").fetchall()
+        return [(r["myriad_slug"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"], r["end_date_override"]) for r in rows]
 
 def delete_manual_pair_myriad(myriad_slug: str, poly_id: str):
     with get_conn() as conn:

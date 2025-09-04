@@ -1,4 +1,3 @@
-# jobs/prune_inactive_pairs.py
 import logging
 from requests.exceptions import RequestException
 from config import b_client, m_client, p_client, log
@@ -20,7 +19,7 @@ def prune_inactive_bodega_pairs():
         log.info("No manual Bodega pairs to check.")
         return
 
-    for b_id, p_id, _, _ in manual_pairs: # Adjusted to handle new tuple format
+    for b_id, p_id, _, _, _ in manual_pairs: # Adjusted to handle new tuple format
         try:
             # 1. Check Bodega market. `fetch_market_config` raises ValueError if not found.
             try:
@@ -62,7 +61,7 @@ def prune_inactive_myriad_pairs():
         log.info("No manual Myriad pairs to check.")
         return
 
-    for m_slug, p_id, _, _ in manual_pairs:
+    for m_slug, p_id, _, _, _ in manual_pairs: # Adjusted to handle new tuple format
         try:
             # 1. Check Myriad market state
             myriad_market = m_client.fetch_market_details(m_slug)

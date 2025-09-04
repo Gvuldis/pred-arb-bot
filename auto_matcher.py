@@ -1,6 +1,6 @@
-# auto_matcher.py
 import logging
 from apscheduler.schedulers.blocking import BlockingScheduler
+from datetime import datetime, timezone
 from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log
 from jobs.fetch_new_bodega import fetch_and_notify_new_bodega
 from jobs.fetch_new_myriad import fetch_and_notify_new_myriad
@@ -15,6 +15,23 @@ from matching.fuzzy import fetch_all_polymarket_clob_markets, fuzzy_match_market
 from services.polymarket.model import build_arbitrage_table, infer_b
 from services.myriad.model import build_arbitrage_table_myriad
 import services.myriad.model as myriad_model
+
+def calculate_apy(roi: float, end_date_ms: int) -> float:
+    """Calculates APY given ROI and an end date timestamp in milliseconds."""
+    if not end_date_ms or roi <= 0:
+        return 0.0
+
+    now_utc = datetime.now(timezone.utc)
+    end_date_utc = datetime.fromtimestamp(end_date_ms / 1000, tz=timezone.utc)
+    
+    time_to_expiry = end_date_utc - now_utc
+    days_to_expiry = time_to_expiry.total_seconds() / (24 * 3600)
+
+    if days_to_expiry <= 0.01: # Avoid division by zero or huge APYs for near-expiry
+        return 0.0
+    
+    apy = (roi / days_to_expiry) * 365
+    return apy
 
 def fetch_and_save_markets():
     """Fetches and saves markets for all platforms."""
@@ -49,7 +66,7 @@ def run_bodega_arb_check():
         opportunities = []
 
         log.info(f"Found {len(manual_pairs)} manual Bodega pairs to check.")
-        for b_id, p_id, is_flipped, profit_threshold in manual_pairs:
+        for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
             try:
                 log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
@@ -59,6 +76,10 @@ def run_bodega_arb_check():
                 if not p_data.get('active') or p_data.get('closed'):
                     log.warning(f"Skipping pair ({b_id}, {p_id}) because Polymarket market is not active.")
                     continue
+                
+                # Determine the end date for APY calculation
+                market_end_date_ms = pool.get('deadline')
+                final_end_date_ms = end_date_override if end_date_override else market_end_date_ms
 
                 bodega_prediction_info = b_client.fetch_prices(b_id)
                 order_book_yes, order_book_no = p_data.get('order_book_yes'), p_data.get('order_book_no')
@@ -80,7 +101,11 @@ def run_bodega_arb_check():
                 pair_opportunities = build_arbitrage_table(Q_YES, Q_NO, order_book_yes, order_book_no, ada_usd, FEE_RATE_BODEGA, inferred_B)
                 
                 for summary in pair_opportunities:
-                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05:
+                    summary['apy'] = calculate_apy(summary.get('roi', 0), final_end_date_ms)
+                    
+                    if summary.get("profit_usd", 0) > profit_threshold and \
+                       summary.get("roi", 0) > 0.05 and \
+                       summary.get("apy", 0) >= 0.50:
                         summary['polymarket_side'] = poly_outcome_name_yes if summary['polymarket_side'] == 'YES' else poly_outcome_name_no
                         pair_desc = f"{pool['name']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, b_id, p_id))
@@ -105,7 +130,7 @@ def run_myriad_arb_check():
         opportunities = []
 
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
-        for m_slug, p_id, is_flipped, profit_threshold in manual_pairs:
+        for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
             try:
                 log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
 
@@ -116,6 +141,19 @@ def run_myriad_arb_check():
                     log.warning(f"Skipping pair ({m_slug}, {p_id}) due to inactive/missing market data.")
                     continue
                 
+                # Determine the end date for APY calculation
+                final_end_date_ms = None
+                if end_date_override:
+                    final_end_date_ms = end_date_override
+                else:
+                    expires_at_str = m_data.get("expires_at")
+                    if expires_at_str:
+                        try:
+                            dt_object = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+                            final_end_date_ms = int(dt_object.timestamp() * 1000)
+                        except (ValueError, TypeError):
+                            log.warning(f"Could not parse Myriad end date: {expires_at_str}")
+
                 m_prices = m_client.fetch_prices(m_slug)
                 if not m_prices: continue
                 
@@ -132,7 +170,11 @@ def run_myriad_arb_check():
                 pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, FEE_RATE_MYRIAD_BUY, inferred_B)
 
                 for summary in pair_opportunities:
-                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05:
+                    summary['apy'] = calculate_apy(summary.get('roi', 0), final_end_date_ms)
+
+                    if summary.get("profit_usd", 0) > profit_threshold and \
+                       summary.get("roi", 0) > 0.05 and \
+                       summary.get("apy", 0) >= 0.50:
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
                         pair_desc = f"{m_data['title']} <-> {p_data['question']}"

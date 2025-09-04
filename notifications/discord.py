@@ -1,4 +1,3 @@
-# notifications/discord.py
 import requests
 import logging
 
@@ -52,7 +51,7 @@ class DiscordNotifier:
             log.warning(f"Skipping Bodega arb notification for '{pair}' due to invalid summary.")
             return
         
-        profit_usd, profit_ada, roi = summary.get("profit_usd", 0), summary.get("profit_ada", 0), summary.get("roi", 0)
+        profit_usd, profit_ada, roi, apy = summary.get("profit_usd", 0), summary.get("profit_ada", 0), summary.get("roi", 0), summary.get("apy", 0)
         ada_usd_rate, inferred_B = summary.get("ada_usd_rate", 0), summary.get("inferred_B", 0)
         bodega_shares, bodega_side = summary.get("bodega_shares", 0), summary.get("bodega_side", "?")
         total_cost_bod_ada = summary.get("cost_bod_ada", 0) + summary.get("fee_bod_ada", 0)
@@ -68,7 +67,7 @@ class DiscordNotifier:
             f"@everyone\n"
             f"🚀 **BODEGA Arbitrage Opportunity** 🚀\n\n"
             f"**Pair:** {pair}\n"
-            f"**Profit:** `${profit_usd:.2f} USD` (`₳{profit_ada:.2f}`) | **ROI:** `{roi*100:.2f}%`\n\n"
+            f"**Profit:** `${profit_usd:.2f} USD` (`₳{profit_ada:.2f}`) | **ROI:** `{roi*100:.2f}%` | **APY:** `{apy*100:.2f}%`\n\n"
             f"----------------------------------------\n"
             f"**Execution Plan:**\n"
             f"**1. Bodega Trade (Execute First!)**\n"
@@ -94,7 +93,7 @@ class DiscordNotifier:
             log.warning(f"Skipping Myriad arb notification for '{pair}' due to invalid summary.")
             return
 
-        profit_usd, roi = summary.get("profit_usd", 0), summary.get("roi", 0)
+        profit_usd, roi, apy = summary.get("profit_usd", 0), summary.get("roi", 0), summary.get("apy", 0)
         inferred_B = summary.get("inferred_B", 0)
         myriad_shares, myriad_side = summary.get("myriad_shares", 0), summary.get("myriad_side_title", "?")
         total_cost_myr_usd = summary.get("cost_myr_usd", 0)
@@ -111,7 +110,7 @@ class DiscordNotifier:
             f"@everyone\n"
             f"🚀 **MYRIAD Arbitrage Opportunity** 🚀\n\n"
             f"**Pair:** {pair}\n"
-            f"**Profit:** `${profit_usd:.2f} USD` | **ROI:** `{roi*100:.2f}%`\n\n"
+            f"**Profit:** `${profit_usd:.2f} USD` | **ROI:** `{roi*100:.2f}%` | **APY:** `{apy*100:.2f}%`\n\n"
             f"----------------------------------------\n"
             f"**Execution Plan:**\n"
             f"**1. Myriad Trade (Execute First!)**\n"
