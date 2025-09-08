@@ -7,11 +7,11 @@ from jobs.fetch_new_myriad import fetch_and_notify_new_myriad
 from jobs.prune_inactive_pairs import prune_all_inactive_pairs
 from streamlit_app.db import (
     load_manual_pairs, load_manual_pairs_myriad,
-    load_bodega_markets, load_polymarkets, save_polymarkets,
+    save_polymarkets,
     load_probability_watches, delete_probability_watch,
-    get_config_value, load_myriad_markets, save_myriad_markets
+    get_config_value, save_myriad_markets
 )
-from matching.fuzzy import fetch_all_polymarket_clob_markets, fuzzy_match_markets
+from matching.fuzzy import fetch_all_polymarket_clob_markets
 from services.polymarket.model import build_arbitrage_table, infer_b
 from services.myriad.model import build_arbitrage_table_myriad
 import services.myriad.model as myriad_model
@@ -65,12 +65,30 @@ def run_bodega_arb_check():
         manual_pairs = load_manual_pairs()
         opportunities = []
 
+        if not manual_pairs:
+            log.info("No manual Bodega pairs to check. Skipping.")
+            return
+
+        # --- OPTIMIZATION: Fetch all market configs once ---
+        try:
+            all_bodega_markets = b_client.fetch_markets()
+            bodega_market_map = {m['id']: m for m in all_bodega_markets}
+            log.info(f"Fetched {len(bodega_market_map)} active Bodega market configs.")
+        except Exception as e:
+            log.error(f"Failed to fetch Bodega market configs: {e}. Aborting Bodega arb check.")
+            return
+
         log.info(f"Found {len(manual_pairs)} manual Bodega pairs to check.")
         for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
             try:
                 log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
-                pool = b_client.fetch_market_config(b_id)
+                # --- OPTIMIZATION: Use pre-fetched market config ---
+                pool = bodega_market_map.get(b_id)
+                if not pool:
+                    log.warning(f"Skipping pair ({b_id}, {p_id}) because Bodega market config was not found in active markets.")
+                    continue
+                
                 p_data = p_client.fetch_market(p_id)
 
                 if not p_data.get('active') or p_data.get('closed'):
@@ -89,7 +107,7 @@ def run_bodega_arb_check():
                     order_book_yes, order_book_no = order_book_no, order_book_yes
                     poly_outcome_name_yes, poly_outcome_name_no = poly_outcome_name_no, poly_outcome_name_yes
 
-                if not all([pool, p_data, bodega_prediction_info, order_book_yes, order_book_no]):
+                if not all([p_data, bodega_prediction_info, order_book_yes, order_book_no]):
                     log.warning(f"Skipping pair ({b_id}, {p_id}) due to missing data.")
                     continue
 
@@ -129,12 +147,26 @@ def run_myriad_arb_check():
         manual_pairs = load_manual_pairs_myriad()
         opportunities = []
 
+        if not manual_pairs:
+            log.info("No manual Myriad pairs to check. Skipping.")
+            return
+
+        # --- OPTIMIZATION: Fetch all Myriad market data once ---
+        try:
+            all_myriad_markets = m_client.fetch_markets()
+            myriad_market_map = {m['slug']: m for m in all_myriad_markets}
+            log.info(f"Fetched {len(myriad_market_map)} active Myriad markets.")
+        except Exception as e:
+            log.error(f"Failed to fetch Myriad markets: {e}. Aborting Myriad arb check.")
+            return
+
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
             try:
                 log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
 
-                m_data = m_client.fetch_market_details(m_slug)
+                # --- OPTIMIZATION: Use pre-fetched market data ---
+                m_data = myriad_market_map.get(m_slug)
                 p_data = p_client.fetch_market(p_id)
 
                 if not all([m_data, p_data]) or m_data.get('state') != 'open' or not p_data.get('active') or p_data.get('closed'):
@@ -154,8 +186,22 @@ def run_myriad_arb_check():
                         except (ValueError, TypeError):
                             log.warning(f"Could not parse Myriad end date: {expires_at_str}")
 
-                m_prices = m_client.fetch_prices(m_slug)
-                if not m_prices: continue
+                # --- OPTIMIZATION: Parse prices directly from m_data, avoid API call ---
+                try:
+                    outcomes = m_data["outcomes"]
+                    outcome1 = next(o for o in outcomes if o['id'] == 0)
+                    outcome2 = next(o for o in outcomes if o['id'] == 1)
+                    m_prices = {
+                        "price1": outcome1.get("price"), "shares1": outcome1.get("shares_held"), "title1": outcome1.get("title"),
+                        "price2": outcome2.get("price"), "shares2": outcome2.get("shares_held"), "title2": outcome2.get("title"),
+                    }
+                except (StopIteration, KeyError, TypeError) as e:
+                    log.error(f"Could not parse outcomes for Myriad market {m_slug}: {e}")
+                    continue
+
+                if m_prices['price1'] is None or m_prices['shares1'] is None:
+                    log.warning(f"Skipping pair for {m_slug} due to missing price/share data in pre-fetched market object.")
+                    continue
                 
                 Q1, Q2 = m_prices['shares1'], m_prices['shares2']
                 P1 = m_prices['price1']

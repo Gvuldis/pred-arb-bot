@@ -30,7 +30,6 @@ class PolymarketClient:
             market_resp = requests.get(market_url, timeout=10)
             market_resp.raise_for_status()
             market_data = market_resp.json()
-            log.info(f"DBG: Raw Polymarket API response: {json.dumps(market_data, indent=2)}")
         except requests.exceptions.RequestException as e:
             log.error(f"Failed to fetch market data for {condition_id}: {e}")
             return {

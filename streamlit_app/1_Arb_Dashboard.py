@@ -18,8 +18,7 @@ from track_record import portfolio_summary
 from streamlit_app.db import (
     init_db, save_bodega_markets, save_polymarkets, save_manual_pair,
     load_manual_pairs, delete_manual_pair, load_new_bodega_markets,
-    remove_new_bodega_market, ignore_bodega_market, add_suggested_match,
-    load_suggested_matches, remove_suggested_match, save_probability_watch,
+    remove_new_bodega_market, ignore_bodega_market, save_probability_watch,
     load_probability_watches, delete_probability_watch, set_config_value, get_config_value,
     save_myriad_markets, load_myriad_markets, load_new_myriad_markets,
     add_new_myriad_market, ignore_myriad_market, remove_new_myriad_market,
@@ -189,39 +188,53 @@ tab_bodega, tab_myriad, tab_other = st.tabs(["Bodega ↔ Polymarket", "Myriad �
 
 with tab_bodega:
     st.header("Bodega ↔ Polymarket Pair Management")
-    st.subheader("➕ Add Manual Bodega Pair")
-    col1, col2, col3 = st.columns([3,3,1])
-    with col1:
-        bid = st.text_input("Bodega ID", key="manual_pair_bodega_id")
-    with col2:
-        search = st.text_input("Search Polymarket", key="manual_pair_poly_search_bodega")
-        pm_results = p_client.search_markets(search) if search else []
-        options = {f'{m["question"]} ({m["condition_id"]})': m["condition_id"] for m in pm_results}
-        pid_label = st.selectbox("Pick Polymarket market", [""] + list(options.keys()), key="bodega_poly_select", index=0)
-        pid = options.get(pid_label, "")
-    with col3:
-        st.write("") # Spacer
-        st.write("") # Spacer
-        if st.button("Add Bodega Pair"):
-            if bid and pid:
-                save_manual_pair(bid, pid, is_flipped=0, profit_threshold_usd=25.0, end_date_override=None)
-                if notifier:
-                    notifier.notify_manual_pair("Bodega", bid, pid)
-                st.success("Bodega pair added!")
-                st.rerun()
-            else:
-                st.warning("Please provide both Bodega ID and select a Polymarket market.")
+    
+    with st.expander("➕ Add New Manual Bodega Pair"):
+        col1, col2, col3 = st.columns([3,3,1])
+        with col1:
+            bid = st.text_input("Bodega ID", key="manual_pair_bodega_id")
+        with col2:
+            search = st.text_input("Search Polymarket", key="manual_pair_poly_search_bodega")
+            pm_results = p_client.search_markets(search) if search else []
+            options = {f'{m["question"]} ({m["condition_id"]})': m["condition_id"] for m in pm_results}
+            pid_label = st.selectbox("Pick Polymarket market", [""] + list(options.keys()), key="bodega_poly_select", index=0)
+            pid = options.get(pid_label, "")
+        with col3:
+            st.write("") # Spacer
+            st.write("") # Spacer
+            if st.button("Add Bodega Pair"):
+                if bid and pid:
+                    save_manual_pair(bid, pid, is_flipped=0, profit_threshold_usd=25.0, end_date_override=None)
+                    if notifier:
+                        notifier.notify_manual_pair("Bodega", bid, pid)
+                    st.success("Bodega pair added!")
+                    st.rerun()
+                else:
+                    st.warning("Please provide both Bodega ID and select a Polymarket market.")
     
     manual_pairs_bodega = load_manual_pairs()
     if manual_pairs_bodega:
-        st.markdown("**Saved Bodega Pairs:**")
-        for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_bodega:
+        st.subheader("📝 Edit Saved Bodega Pair")
+        pair_options = {
+            f"{bodega_map.get(b_id, {'name': 'Unknown'})['name']} ({b_id})": (b_id, p_id, is_flipped, profit_threshold, end_date_override)
+            for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_bodega
+        }
+        
+        sorted_options = sorted(pair_options.keys())
+        selected_pair_label = st.selectbox(
+            "Select a pair to view or edit:",
+            options=["-- Select a Pair --"] + sorted_options,
+            key="bodega_pair_selector"
+        )
+
+        if selected_pair_label != "-- Select a Pair --":
+            b_id, p_id, is_flipped, profit_threshold, end_date_override = pair_options[selected_pair_label]
             b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
             p_url = f"https://polymarket.com/event/{p_id}"
             
             c1_disp, c2_disp = st.columns([12, 1])
             with c1_disp:
-                st.markdown(f"• [Bodega]({b_url}) `({b_id})` ↔ [Polymarket]({p_url}) `({p_id})`")
+                st.markdown(f"• [Bodega Link]({b_url}) ↔ [Polymarket Link]({p_url})")
             with c2_disp:
                 if st.button("❌", key=f"del_pair_bodega_{b_id}_{p_id}", help="Delete this pair"):
                     delete_manual_pair(b_id, p_id)
@@ -252,7 +265,6 @@ with tab_bodega:
                     st.success(f"Pair {b_id}/{p_id} updated.")
                     time.sleep(1)
                     st.rerun()
-            st.markdown("---")
 
     st.subheader("🆕 Pending New Bodega Markets")
     pending_bodega = load_new_bodega_markets()
@@ -285,41 +297,54 @@ with tab_bodega:
 
 with tab_myriad:
     st.header("Myriad ↔ Polymarket Pair Management")
-    st.subheader("➕ Add Manual Myriad Pair")
-    mcol1, mcol2, mcol3 = st.columns([3,3,1])
-    with mcol1:
-        myriad_search = st.text_input("Search Myriad Markets", key="manual_pair_myriad_search")
-        myriad_markets_db = load_myriad_markets()
-        myriad_results = [m for m in myriad_markets_db if myriad_search.lower() in m['name'].lower()] if myriad_search else []
-        myriad_options = {f"{m['name']} ({m['slug']})": m['slug'] for m in myriad_results}
-        myriad_label = st.selectbox("Pick Myriad Market", [""] + list(myriad_options.keys()), key="myriad_select", index=0)
-        myriad_slug = myriad_options.get(myriad_label, "")
-    with mcol2:
-        poly_search_myriad = st.text_input("Search Polymarket", key="manual_pair_poly_search_myriad")
-        pm_results_myriad = p_client.search_markets(poly_search_myriad) if poly_search_myriad else []
-        poly_options_myriad = {f'{m["question"]} ({m["condition_id"]})': m["condition_id"] for m in pm_results_myriad}
-        poly_label_myriad = st.selectbox("Pick Polymarket Market", [""] + list(poly_options_myriad.keys()), key="myriad_poly_select", index=0)
-        poly_id_myriad = poly_options_myriad.get(poly_label_myriad, "")
-    with mcol3:
-        st.write("")
-        st.write("")
-        if st.button("Add Myriad Pair"):
-            if myriad_slug and poly_id_myriad:
-                save_manual_pair_myriad(myriad_slug, poly_id_myriad, 0, 25.0, None)
-                if notifier: notifier.notify_manual_pair("Myriad", myriad_slug, poly_id_myriad)
-                st.success("Myriad pair added!"); st.rerun()
-            else: st.warning("Please provide both market selections.")
+    with st.expander("➕ Add New Manual Myriad Pair"):
+        mcol1, mcol2, mcol3 = st.columns([3,3,1])
+        with mcol1:
+            myriad_search = st.text_input("Search Myriad Markets", key="manual_pair_myriad_search")
+            myriad_markets_db = load_myriad_markets()
+            myriad_results = [m for m in myriad_markets_db if myriad_search.lower() in m['name'].lower()] if myriad_search else []
+            myriad_options = {f"{m['name']} ({m['slug']})": m['slug'] for m in myriad_results}
+            myriad_label = st.selectbox("Pick Myriad Market", [""] + list(myriad_options.keys()), key="myriad_select", index=0)
+            myriad_slug = myriad_options.get(myriad_label, "")
+        with mcol2:
+            poly_search_myriad = st.text_input("Search Polymarket", key="manual_pair_poly_search_myriad")
+            pm_results_myriad = p_client.search_markets(poly_search_myriad) if poly_search_myriad else []
+            poly_options_myriad = {f'{m["question"]} ({m["condition_id"]})': m["condition_id"] for m in pm_results_myriad}
+            poly_label_myriad = st.selectbox("Pick Polymarket Market", [""] + list(poly_options_myriad.keys()), key="myriad_poly_select", index=0)
+            poly_id_myriad = poly_options_myriad.get(poly_label_myriad, "")
+        with mcol3:
+            st.write("")
+            st.write("")
+            if st.button("Add Myriad Pair"):
+                if myriad_slug and poly_id_myriad:
+                    save_manual_pair_myriad(myriad_slug, poly_id_myriad, 0, 25.0, None)
+                    if notifier: notifier.notify_manual_pair("Myriad", myriad_slug, poly_id_myriad)
+                    st.success("Myriad pair added!"); st.rerun()
+                else: st.warning("Please provide both market selections.")
 
     manual_pairs_myriad = load_manual_pairs_myriad()
     if manual_pairs_myriad:
-        st.markdown("**Saved Myriad Pairs:**")
-        for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_myriad:
+        st.subheader("📝 Edit Saved Myriad Pair")
+        myriad_pair_options = {
+            f"{myriad_map.get(m_slug, {'name': 'Unknown'})['name']} ({m_slug})": (m_slug, p_id, is_flipped, profit_threshold, end_date_override)
+            for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_myriad
+        }
+        
+        sorted_myriad_options = sorted(myriad_pair_options.keys())
+        selected_myriad_pair_label = st.selectbox(
+            "Select a pair to view or edit:",
+            options=["-- Select a Pair --"] + sorted_myriad_options,
+            key="myriad_pair_selector"
+        )
+        
+        if selected_myriad_pair_label != "-- Select a Pair --":
+            m_slug, p_id, is_flipped, profit_threshold, end_date_override = myriad_pair_options[selected_myriad_pair_label]
             m_url = f"https://app.myriad.social/markets/{m_slug}"
             p_url = f"https://polymarket.com/event/{p_id}"
             
             c1_disp_m, c2_disp_m = st.columns([12,1])
             with c1_disp_m:
-                st.markdown(f"• [Myriad]({m_url}) `({m_slug})` ↔ [Polymarket]({p_url}) `({p_id})`")
+                st.markdown(f"• [Myriad Link]({m_url}) ↔ [Polymarket Link]({p_url})")
             with c2_disp_m:
                 if st.button("❌", key=f"del_pair_myriad_{m_slug}_{p_id}", help="Delete this pair"):
                     delete_manual_pair_myriad(m_slug, p_id)
@@ -351,7 +376,6 @@ with tab_myriad:
                         new_override_ts = int(combined_dt.timestamp() * 1000)
                     save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts)
                     st.success(f"Pair {m_slug}/{p_id} updated."); time.sleep(1); st.rerun()
-            st.markdown("---")
 
     st.subheader("🆕 Pending New Myriad Markets")
     pending_myriad = load_new_myriad_markets()
@@ -435,10 +459,23 @@ if st.button("Check All Manual Pairs for Arbitrage"):
         bodega_results = []
         if not manual_pairs_bodega_check: st.info("No manual Bodega pairs to check.")
         else:
+            # --- OPTIMIZATION: Fetch all Bodega market configs once ---
+            try:
+                all_bodega_markets = b_client.fetch_markets()
+                bodega_market_map = {m['id']: m for m in all_bodega_markets}
+            except Exception as e:
+                st.error(f"Failed to fetch Bodega market configs: {e}")
+                bodega_market_map = {}
+
             prog = st.progress(0, text="Checking Bodega pairs...")
             for i, (b_id, p_id, is_flipped, profit_threshold, end_date_override) in enumerate(manual_pairs_bodega_check, start=1):
                 try:
-                    pool = b_client.fetch_market_config(b_id)
+                    # --- OPTIMIZATION: Use pre-fetched market config ---
+                    pool = bodega_market_map.get(b_id)
+                    if not pool:
+                        log.warning(f"Dashboard check: Skipping pair ({b_id}, {p_id}) because Bodega market config was not found.")
+                        continue
+
                     p_data = p_client.fetch_market(p_id)
                     if not p_data.get('active') or p_data.get('closed'): continue
                     
@@ -518,11 +555,20 @@ if st.button("Check All Manual Pairs for Arbitrage"):
         manual_pairs_myriad_check = load_manual_pairs_myriad()
         if not manual_pairs_myriad_check: st.info("No manual Myriad pairs to check.")
         else:
+            # --- OPTIMIZATION: Fetch all Myriad markets once ---
+            try:
+                all_myriad_markets = m_client.fetch_markets()
+                myriad_market_map = {m['slug']: m for m in all_myriad_markets}
+            except Exception as e:
+                st.error(f"Failed to fetch Myriad markets: {e}")
+                myriad_market_map = {}
+
             prog_myriad = st.progress(0, text="Checking Myriad pairs...")
             myriad_results = []
             for i, (m_slug, p_id, is_flipped, profit_threshold, end_date_override) in enumerate(manual_pairs_myriad_check, start=1):
                 try:
-                    m_data = m_client.fetch_market_details(m_slug)
+                    # --- OPTIMIZATION: Use pre-fetched market data ---
+                    m_data = myriad_market_map.get(m_slug)
                     p_data = p_client.fetch_market(p_id)
                     if not all([m_data, p_data]) or m_data.get('state') != 'open' or not p_data.get('active'): continue
                     
@@ -533,8 +579,20 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         dt_obj = datetime.fromisoformat(m_data["expires_at"].replace('Z', '+00:00'))
                         final_end_date_ms = int(dt_obj.timestamp() * 1000)
 
-                    m_prices = m_client.fetch_prices(m_slug)
-                    if not m_prices: continue
+                    # --- OPTIMIZATION: Parse prices directly from m_data ---
+                    try:
+                        outcomes = m_data["outcomes"]
+                        outcome1 = next(o for o in outcomes if o['id'] == 0)
+                        outcome2 = next(o for o in outcomes if o['id'] == 1)
+                        m_prices = {
+                            "price1": outcome1.get("price"), "shares1": outcome1.get("shares_held"), "title1": outcome1.get("title"),
+                            "price2": outcome2.get("price"), "shares2": outcome2.get("shares_held"), "title2": outcome2.get("title"),
+                        }
+                    except (StopIteration, KeyError, TypeError) as e:
+                        log.error(f"Could not parse outcomes for Myriad market {m_slug}: {e}")
+                        continue
+                    
+                    if m_prices['price1'] is None or m_prices['shares1'] is None: continue
 
                     Q1, Q2, P1 = m_prices['shares1'], m_prices['shares2'], m_prices['price1']
                     inferred_B_myriad = infer_b_myriad(Q1, Q2, P1)

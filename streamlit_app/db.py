@@ -94,14 +94,6 @@ def init_db():
           fetched_at   INTEGER
         )""")
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS suggested_matches (
-          bodega_id          TEXT,
-          poly_id            TEXT,
-          score              REAL,
-          first_suggested    INTEGER,
-          PRIMARY KEY (bodega_id, poly_id)
-        )""")
-        cur.execute("""
         CREATE TABLE IF NOT EXISTS probability_watches (
           bodega_id             TEXT PRIMARY KEY,
           description           TEXT,
@@ -252,21 +244,6 @@ def delete_manual_pair_myriad(myriad_slug: str, poly_id: str):
         conn.commit()
 
 # --- Other Functions ---
-def load_suggested_matches() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM suggested_matches").fetchall()
-        return [dict(r) for r in rows]
-
-def add_suggested_match(bodega_id: str, poly_id: str, score: float):
-    with get_conn() as conn:
-        conn.execute("INSERT OR IGNORE INTO suggested_matches (bodega_id, poly_id, score, first_suggested) VALUES (?,?,?,?)", (bodega_id, poly_id, score, int(time.time())))
-        conn.commit()
-
-def remove_suggested_match(bodega_id: str, poly_id: str):
-    with get_conn() as conn:
-        conn.execute("DELETE FROM suggested_matches WHERE bodega_id=? AND poly_id=?", (bodega_id, poly_id))
-        conn.commit()
-
 def save_probability_watch(bodega_id: str, description: str, expected_prob: float, deviation_threshold: float):
     with get_conn() as conn:
         conn.execute("INSERT OR REPLACE INTO probability_watches (bodega_id, description, expected_probability, deviation_threshold, created_at) VALUES (?, ?, ?, ?, ?)", (bodega_id, description, expected_prob, deviation_threshold, int(time.time())))

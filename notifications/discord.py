@@ -36,13 +36,6 @@ class DiscordNotifier:
                    f"Polymarket ID: `{poly_id}`")
         self.send(content)
 
-    def notify_auto_match(self, matches_count: int, ignored_count: int):
-        """Notify upon auto-match completion."""
-        content = (f"🔄 **Auto-Match Completed**\n"
-                   f"Matches found: {matches_count}\n"
-                   f"Ignored: {ignored_count}")
-        self.send(content)
-
     def notify_arb_opportunity(self, pair: str, summary: dict, b_id: str, p_id: str, bodega_api_base: str):
         """
         Notify for each Bodega arbitrage opportunity with a detailed execution and payout plan.

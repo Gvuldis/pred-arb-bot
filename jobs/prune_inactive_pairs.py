@@ -19,12 +19,19 @@ def prune_inactive_bodega_pairs():
         log.info("No manual Bodega pairs to check.")
         return
 
-    for b_id, p_id, _, _, _ in manual_pairs: # Adjusted to handle new tuple format
+    # --- OPTIMIZATION: Fetch all active Bodega markets once ---
+    try:
+        all_bodega_markets = b_client.fetch_markets()
+        active_bodega_ids = {m['id'] for m in all_bodega_markets}
+        log.info(f"Pruner fetched {len(active_bodega_ids)} active Bodega markets.")
+    except Exception as e:
+        log.error(f"Pruner failed to fetch Bodega markets: {e}. Aborting.")
+        return
+
+    for b_id, p_id, _, _, _ in manual_pairs:
         try:
-            # 1. Check Bodega market. `fetch_market_config` raises ValueError if not found.
-            try:
-                b_client.fetch_market_config(b_id)
-            except ValueError:
+            # 1. Check Bodega market using pre-fetched list
+            if b_id not in active_bodega_ids:
                 log.info(f"Pruning Bodega pair ({b_id}, {p_id}): Bodega market no longer active.")
                 delete_manual_pair(b_id, p_id)
                 pruned_count += 1
@@ -61,10 +68,19 @@ def prune_inactive_myriad_pairs():
         log.info("No manual Myriad pairs to check.")
         return
 
-    for m_slug, p_id, _, _, _ in manual_pairs: # Adjusted to handle new tuple format
+    # --- OPTIMIZATION: Fetch all active Myriad markets once ---
+    try:
+        all_myriad_markets = m_client.fetch_markets()
+        myriad_market_map = {m['slug']: m for m in all_myriad_markets}
+        log.info(f"Pruner fetched {len(myriad_market_map)} active Myriad markets.")
+    except Exception as e:
+        log.error(f"Pruner failed to fetch Myriad markets: {e}. Aborting.")
+        return
+
+    for m_slug, p_id, _, _, _ in manual_pairs:
         try:
-            # 1. Check Myriad market state
-            myriad_market = m_client.fetch_market_details(m_slug)
+            # 1. Check Myriad market state using pre-fetched data
+            myriad_market = myriad_market_map.get(m_slug)
             if not myriad_market or myriad_market.get('state') != 'open':
                 log.info(f"Pruning Myriad pair ({m_slug}, {p_id}): Myriad market no longer open.")
                 delete_manual_pair_myriad(m_slug, p_id)
