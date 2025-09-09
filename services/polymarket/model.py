@@ -110,10 +110,10 @@ def _calculate_trade_outcome(
     comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
     comb_usd = comb_ada * ada_to_usd
     
-    # Profit is based on the number of Bodega shares we intended to buy.
-    # The `fill_status` will indicate if the hedge was incomplete.
     profit_ada = x_bod - comb_ada
     profit_usd = profit_ada * ada_to_usd
+    roi = profit_usd / comb_usd if comb_usd > 0 else 0
+    score = roi * profit_usd
     
     fill_status = filled_poly >= poly_shares_to_buy
 
@@ -129,7 +129,8 @@ def _calculate_trade_outcome(
         "comb_usd": comb_usd,
         "profit_ada": profit_ada,
         "profit_usd": profit_usd,
-        "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
+        "roi": roi,
+        "score": score,
         "fill": fill_status,
         "p_end": compute_price(q1_bod + x_bod, q2_bod, b)
     }
@@ -163,6 +164,8 @@ def _calculate_trade_outcome_fixed_shares(
     
     profit_ada = x_bod - comb_ada
     profit_usd = profit_ada * ada_to_usd
+    roi = profit_usd / comb_usd if comb_usd > 0 else 0
+    score = roi * profit_usd
     
     fill_status = filled_poly >= poly_shares_to_buy if poly_shares_to_buy > 0 else True
 
@@ -178,7 +181,8 @@ def _calculate_trade_outcome_fixed_shares(
         "comb_usd": comb_usd,
         "profit_ada": profit_ada,
         "profit_usd": profit_usd,
-        "roi": profit_usd / comb_usd if comb_usd > 0 else 0,
+        "roi": roi,
+        "score": score,
         "fill": fill_status,
         "p_end": compute_price(q1_bod + x_bod, q2_bod, b)
     }
@@ -191,7 +195,7 @@ def build_arbitrage_table(
 ) -> List[Dict[str, Any]]:
     """
     Calculates arbitrage opportunities by testing various price targets.
-    - If a profitable trade is found, it returns the most profitable one.
+    - If a profitable trade is found, it returns the one with the highest score (ROI * Profit).
     - If no profitable trade is found, it calculates the profit/loss for a
       hypothetical 1-share trade to show the current market state.
     """
@@ -225,13 +229,13 @@ def build_arbitrage_table(
                 outcome['adjustment'] = adj
                 scenario_1_outcomes.append(outcome)
 
-        best_outcome = max(scenario_1_outcomes, key=lambda x: x['profit_usd']) if scenario_1_outcomes else None
+        best_outcome = max(scenario_1_outcomes, key=lambda x: x.get('score', 0)) if scenario_1_outcomes else None
         
         final_outcome = None
         analysis_details = []
 
         if best_outcome and best_outcome['profit_usd'] > 0:
-            log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f}")
+            log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
             final_outcome = best_outcome
             analysis_details = scenario_1_outcomes
         else:
@@ -277,13 +281,13 @@ def build_arbitrage_table(
                 outcome['adjustment'] = adj
                 scenario_2_outcomes.append(outcome)
 
-        best_outcome = max(scenario_2_outcomes, key=lambda x: x['profit_usd']) if scenario_2_outcomes else None
+        best_outcome = max(scenario_2_outcomes, key=lambda x: x.get('score', 0)) if scenario_2_outcomes else None
         
         final_outcome = None
         analysis_details = []
 
         if best_outcome and best_outcome['profit_usd'] > 0:
-            log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f}")
+            log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
             final_outcome = best_outcome
             analysis_details = scenario_2_outcomes
         else:

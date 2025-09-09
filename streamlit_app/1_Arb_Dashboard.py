@@ -523,11 +523,13 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     else:
                         st.markdown(f"**{opp['description']}**")
                     
-                    main_cols = st.columns(4)
+                    main_cols = st.columns(5)
                     main_cols[0].metric("Potential Profit/Loss (USD)", f"${summary.get('profit_usd', 0):.2f}")
                     main_cols[1].metric("Return on Investment (ROI)", f"{summary.get('roi', 0)*100:.2f}%")
                     main_cols[2].metric("APY", f"{apy*100:.2f}%")
-                    main_cols[3].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
+                    main_cols[3].metric("Score (Profit*ROI)", f"{summary.get('score', 0):.4f}")
+                    main_cols[4].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
+
                     trade_cols = st.columns(2)
                     with trade_cols[0]:
                         st.markdown("##### 1. Bodega Trade")
@@ -540,10 +542,17 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     if analysis_data:
                         with st.expander("Show Detailed Price Adjustment Analysis"):
                             df_analysis = pd.DataFrame(analysis_data)
-                            df_display = df_analysis[['adjustment', 'p_end', 'bodega_shares', 'profit_usd', 'roi']].copy()
-                            df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'bodega_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)'}, inplace=True)
+                            df_display = df_analysis[['adjustment', 'p_end', 'bodega_shares', 'profit_usd', 'roi', 'score']].copy()
+                            df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'bodega_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)', 'score': 'Score'}, inplace=True)
                             df_display['ROI (%)'] = df_display['ROI (%)'] * 100
-                            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={"Adj": st.column_config.NumberColumn(format="%.2f"), "Target Price": st.column_config.NumberColumn(format="%.4f"), "Shares": st.column_config.NumberColumn(format="%d"), "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), "ROI (%)": st.column_config.NumberColumn(format="%.2f%%")})
+                            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={
+                                "Adj": st.column_config.NumberColumn(format="%.2f"), 
+                                "Target Price": st.column_config.NumberColumn(format="%.4f"), 
+                                "Shares": st.column_config.NumberColumn(format="%d"), 
+                                "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), 
+                                "ROI (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                                "Score": st.column_config.NumberColumn(format="%.4f")
+                            })
                     else:
                         st.caption("Profit/Loss based on a 1-share trade.")
                     st.markdown("---")
@@ -633,11 +642,12 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     else:
                         st.markdown(f"**{opp['description']}**")
 
-                    m_cols = st.columns(4)
+                    m_cols = st.columns(5)
                     m_cols[0].metric("Potential Profit/Loss (USD)", f"${profit:.2f}")
                     m_cols[1].metric("ROI", f"{roi*100:.2f}%")
                     m_cols[2].metric("APY", f"{apy*100:.2f}%")
-                    m_cols[3].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
+                    m_cols[3].metric("Score (Profit*ROI)", f"{summary.get('score', 0):.4f}")
+                    m_cols[4].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
                     t_cols = st.columns(2)
                     with t_cols[0]:
                         st.markdown("##### 1. Myriad Trade")
@@ -650,10 +660,17 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     if analysis_data:
                         with st.expander("Show Detailed Price Adjustment Analysis"):
                             df_analysis = pd.DataFrame(analysis_data)
-                            df_display = df_analysis[['adjustment', 'p_end', 'myriad_shares', 'profit_usd', 'roi']].copy()
-                            df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'myriad_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)'}, inplace=True)
+                            df_display = df_analysis[['adjustment', 'p_end', 'myriad_shares', 'profit_usd', 'roi', 'score']].copy()
+                            df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'myriad_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)', 'score': 'Score'}, inplace=True)
                             df_display['ROI (%)'] = df_display['ROI (%)'] * 100
-                            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={"Adj": st.column_config.NumberColumn(format="%.2f"), "Target Price": st.column_config.NumberColumn(format="%.4f"), "Shares": st.column_config.NumberColumn(format="%d"), "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), "ROI (%)": st.column_config.NumberColumn(format="%.2f%%")})
+                            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={
+                                "Adj": st.column_config.NumberColumn(format="%.2f"), 
+                                "Target Price": st.column_config.NumberColumn(format="%.4f"), 
+                                "Shares": st.column_config.NumberColumn(format="%d"), 
+                                "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), 
+                                "ROI (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                                "Score": st.column_config.NumberColumn(format="%.4f")
+                            })
                     else:
                         st.caption("Profit/Loss based on a 1-share trade.")
                     st.markdown("---")

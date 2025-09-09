@@ -100,9 +100,10 @@ def _calculate_trade_outcome_myriad(
 
     total_cost_usd = total_cost_myr_usd + cost_poly_usd
     
-    # Payout is simply the number of shares, as they are worth $1 on resolution
     payout_usd = shares_to_buy_myr
     profit_usd = payout_usd - total_cost_usd
+    roi = profit_usd / total_cost_usd if total_cost_usd > 0 else 0
+    score = roi * profit_usd
     
     return {
         "myriad_shares": shares_to_buy_myr,
@@ -113,7 +114,8 @@ def _calculate_trade_outcome_myriad(
         "avg_poly_price": avg_poly_price,
         "total_cost_usd": total_cost_usd,
         "profit_usd": profit_usd,
-        "roi": profit_usd / total_cost_usd if total_cost_usd > 0 else 0,
+        "roi": roi,
+        "score": score,
         "fill": filled_poly >= poly_shares_to_buy,
         "p_end": compute_price(q1_myr + shares_to_buy_myr, q2_myr, b)[0]
     }
@@ -142,6 +144,8 @@ def _calculate_trade_outcome_myriad_fixed_shares(
     
     payout_usd = shares_to_buy_myriad
     profit_usd = payout_usd - total_cost_usd
+    roi = profit_usd / total_cost_usd if total_cost_usd > 0 else 0
+    score = roi * profit_usd
     
     return {
         "myriad_shares": shares_to_buy_myriad,
@@ -152,7 +156,8 @@ def _calculate_trade_outcome_myriad_fixed_shares(
         "avg_poly_price": avg_poly_price,
         "total_cost_usd": total_cost_usd,
         "profit_usd": profit_usd,
-        "roi": profit_usd / total_cost_usd if total_cost_usd > 0 else 0,
+        "roi": roi,
+        "score": score,
         "fill": filled_poly >= poly_shares_to_buy,
         "p_end": compute_price(q1_myr + shares_to_buy_myriad, q2_myr, b)[0]
     }
@@ -184,7 +189,7 @@ def build_arbitrage_table_myriad(
                 outcome['adjustment'] = adj
                 scenario_1_outcomes.append(outcome)
         
-        best_outcome = max(scenario_1_outcomes, key=lambda x: x['profit_usd']) if scenario_1_outcomes else None
+        best_outcome = max(scenario_1_outcomes, key=lambda x: x.get('score', 0)) if scenario_1_outcomes else None
         
         final_outcome = None
         analysis_details = []
@@ -223,7 +228,7 @@ def build_arbitrage_table_myriad(
                 outcome['adjustment'] = adj
                 scenario_2_outcomes.append(outcome)
         
-        best_outcome = max(scenario_2_outcomes, key=lambda x: x['profit_usd']) if scenario_2_outcomes else None
+        best_outcome = max(scenario_2_outcomes, key=lambda x: x.get('score', 0)) if scenario_2_outcomes else None
         
         final_outcome = None
         analysis_details = []
