@@ -1,4 +1,3 @@
-# services/polymarket/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -110,10 +109,11 @@ def _calculate_trade_outcome(
     comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
     comb_usd = comb_ada * ada_to_usd
     
-    profit_ada = x_bod - comb_ada
+    payout_ada = x_bod * 0.98 # 2% redemption fee
+    profit_ada = payout_ada - comb_ada
     profit_usd = profit_ada * ada_to_usd
     roi = profit_usd / comb_usd if comb_usd > 0 else 0
-    score = roi * profit_usd
+    score = profit_usd if profit_usd < 0 else roi * profit_usd
     
     fill_status = filled_poly >= poly_shares_to_buy
 
@@ -162,10 +162,11 @@ def _calculate_trade_outcome_fixed_shares(
     comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
     comb_usd = comb_ada * ada_to_usd
     
-    profit_ada = x_bod - comb_ada
+    payout_ada = x_bod * 0.98 # 2% redemption fee
+    profit_ada = payout_ada - comb_ada
     profit_usd = profit_ada * ada_to_usd
     roi = profit_usd / comb_usd if comb_usd > 0 else 0
-    score = roi * profit_usd
+    score = profit_usd if profit_usd < 0 else roi * profit_usd
     
     fill_status = filled_poly >= poly_shares_to_buy if poly_shares_to_buy > 0 else True
 
@@ -187,6 +188,60 @@ def _calculate_trade_outcome_fixed_shares(
         "p_end": compute_price(q1_bod + x_bod, q2_bod, b)
     }
 
+def _iterative_search(calculation_func, **kwargs):
+    """
+    Performs a three-stage iterative search for the best trade outcome.
+    """
+    all_outcomes = []
+    
+    # Stage 1: Coarse search
+    coarse_adjustments = [i / 100.0 for i in range(0, 51)] # 0.00 to 0.50, step 0.01
+    for adj in coarse_adjustments:
+        outcome = calculation_func(target_adjustment=adj, **kwargs)
+        if outcome:
+            all_outcomes.append(outcome)
+            
+    if not all_outcomes:
+        return None, []
+
+    best_coarse = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+    
+    # Stage 2: Fine search
+    if best_coarse.get('score', -1) > 0:
+        best_adj_coarse = best_coarse['adjustment']
+        fine_start = max(0, best_adj_coarse - 0.01)
+        # Generate 21 steps of 0.001 around the best coarse adjustment
+        fine_adjustments = [fine_start + i * 0.001 for i in range(21)]
+        
+        for adj in fine_adjustments:
+            outcome = calculation_func(target_adjustment=adj, **kwargs)
+            if outcome:
+                all_outcomes.append(outcome)
+
+    if not all_outcomes:
+        return None, []
+        
+    best_fine = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+
+    # Stage 3: Super-fine search
+    if best_fine.get('score', -1) > 0:
+        best_adj_fine = best_fine['adjustment']
+        super_fine_start = max(0, best_adj_fine - 0.001)
+        # Generate 21 steps of 0.0001 around the best fine adjustment
+        super_fine_adjustments = [super_fine_start + i * 0.0001 for i in range(21)]
+
+        for adj in super_fine_adjustments:
+            outcome = calculation_func(target_adjustment=adj, **kwargs)
+            if outcome:
+                all_outcomes.append(outcome)
+
+    if not all_outcomes:
+        return None, []
+
+    best_overall = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+    
+    return best_overall, all_outcomes
+
 # --- Main function ---
 def build_arbitrage_table(
     Q_YES: float, Q_NO: float,
@@ -205,39 +260,35 @@ def build_arbitrage_table(
     all_opportunities = []
     initial_cost_bod_ada = lmsr_cost(Q_YES, Q_NO, B)
     
-    price_adjustments = [i / 100.0 for i in range(0, 26)]
-
     # --- Scenario 1: Buy YES on Bodega, hedge with NO on Polymarket ---
     if ORDER_BOOK_NO:
         p_bod_yes_start = compute_price(Q_YES, Q_NO, B)
         p_poly_no_best_ask = ORDER_BOOK_NO[0][0]
         implied_poly_yes_price = 1 - p_poly_no_best_ask
         
-        scenario_1_outcomes = []
         log.info(f"--- Analyzing BUY YES Bodega (vs Poly NO price of {p_poly_no_best_ask:.4f}, implied YES price {implied_poly_yes_price:.4f}) ---")
         
-        for adj in price_adjustments:
-            target_bodega_price = implied_poly_yes_price - adj
-            outcome = _calculate_trade_outcome(
-                q1_bod=Q_YES, q2_bod=Q_NO, b=B,
-                order_book_poly=ORDER_BOOK_NO,
-                ada_to_usd=ADA_TO_USD, fee_rate=FEE_RATE,
-                initial_cost_bod_ada=initial_cost_bod_ada,
-                target_bodega_price=target_bodega_price
-            )
+        def calculate_scenario_1(target_adjustment, **kwargs):
+            target_price = implied_poly_yes_price - target_adjustment
+            outcome = _calculate_trade_outcome(target_bodega_price=target_price, **kwargs)
             if outcome:
-                outcome['adjustment'] = adj
-                scenario_1_outcomes.append(outcome)
+                outcome['adjustment'] = target_adjustment
+            return outcome
 
-        best_outcome = max(scenario_1_outcomes, key=lambda x: x.get('score', 0)) if scenario_1_outcomes else None
+        common_args = {
+            'q1_bod': Q_YES, 'q2_bod': Q_NO, 'b': B,
+            'order_book_poly': ORDER_BOOK_NO, 'ada_to_usd': ADA_TO_USD,
+            'fee_rate': FEE_RATE, 'initial_cost_bod_ada': initial_cost_bod_ada
+        }
+
+        best_outcome, all_s1_outcomes = _iterative_search(calculate_scenario_1, **common_args)
         
         final_outcome = None
-        analysis_details = []
+        analysis_details = sorted(all_s1_outcomes, key=lambda x: x.get('adjustment')) if all_s1_outcomes else []
 
         if best_outcome and best_outcome['profit_usd'] > 0:
-            log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
+            log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.4f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
             final_outcome = best_outcome
-            analysis_details = scenario_1_outcomes
         else:
             log.info("No profitable arbitrage for BUY YES Bodega, calculating loss for 1 share.")
             one_share_outcome = _calculate_trade_outcome_fixed_shares(
@@ -265,31 +316,29 @@ def build_arbitrage_table(
         p_poly_yes_best_ask = ORDER_BOOK_YES[0][0]
         implied_poly_no_price = 1 - p_poly_yes_best_ask
         
-        scenario_2_outcomes = []
         log.info(f"--- Analyzing BUY NO Bodega (vs Poly YES price of {p_poly_yes_best_ask:.4f}, implied NO price {implied_poly_no_price:.4f}) ---")
 
-        for adj in price_adjustments:
-            target_bodega_price = implied_poly_no_price - adj
-            outcome = _calculate_trade_outcome(
-                q1_bod=Q_NO, q2_bod=Q_YES, b=B,
-                order_book_poly=ORDER_BOOK_YES,
-                ada_to_usd=ADA_TO_USD, fee_rate=FEE_RATE,
-                initial_cost_bod_ada=initial_cost_bod_ada,
-                target_bodega_price=target_bodega_price
-            )
+        def calculate_scenario_2(target_adjustment, **kwargs):
+            target_price = implied_poly_no_price - target_adjustment
+            outcome = _calculate_trade_outcome(target_bodega_price=target_price, **kwargs)
             if outcome:
-                outcome['adjustment'] = adj
-                scenario_2_outcomes.append(outcome)
-
-        best_outcome = max(scenario_2_outcomes, key=lambda x: x.get('score', 0)) if scenario_2_outcomes else None
+                outcome['adjustment'] = target_adjustment
+            return outcome
+            
+        common_args_s2 = {
+            'q1_bod': Q_NO, 'q2_bod': Q_YES, 'b': B,
+            'order_book_poly': ORDER_BOOK_YES, 'ada_to_usd': ADA_TO_USD,
+            'fee_rate': FEE_RATE, 'initial_cost_bod_ada': initial_cost_bod_ada
+        }
         
+        best_outcome, all_s2_outcomes = _iterative_search(calculate_scenario_2, **common_args_s2)
+
         final_outcome = None
-        analysis_details = []
+        analysis_details = sorted(all_s2_outcomes, key=lambda x: x.get('adjustment')) if all_s2_outcomes else []
 
         if best_outcome and best_outcome['profit_usd'] > 0:
-            log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.2f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
+            log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.4f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
             final_outcome = best_outcome
-            analysis_details = scenario_2_outcomes
         else:
             log.info("No profitable arbitrage for BUY NO Bodega, calculating loss for 1 share.")
             one_share_outcome = _calculate_trade_outcome_fixed_shares(

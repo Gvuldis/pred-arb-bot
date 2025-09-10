@@ -1,3 +1,4 @@
+# auto_matcher.py
 import logging
 from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timezone
@@ -151,22 +152,13 @@ def run_myriad_arb_check():
             log.info("No manual Myriad pairs to check. Skipping.")
             return
 
-        # --- OPTIMIZATION: Fetch all Myriad market data once ---
-        try:
-            all_myriad_markets = m_client.fetch_markets()
-            myriad_market_map = {m['slug']: m for m in all_myriad_markets}
-            log.info(f"Fetched {len(myriad_market_map)} active Myriad markets.")
-        except Exception as e:
-            log.error(f"Failed to fetch Myriad markets: {e}. Aborting Myriad arb check.")
-            return
-
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
             try:
                 log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
 
-                # --- OPTIMIZATION: Use pre-fetched market data ---
-                m_data = myriad_market_map.get(m_slug)
+                # --- NEW: Fetch Myriad and Polymarket data fresh for EACH pair ---
+                m_data = m_client.fetch_market_details(m_slug)
                 p_data = p_client.fetch_market(p_id)
 
                 if not all([m_data, p_data]) or m_data.get('state') != 'open' or not p_data.get('active') or p_data.get('closed'):
@@ -186,21 +178,14 @@ def run_myriad_arb_check():
                         except (ValueError, TypeError):
                             log.warning(f"Could not parse Myriad end date: {expires_at_str}")
 
-                # --- OPTIMIZATION: Parse prices directly from m_data, avoid API call ---
-                try:
-                    outcomes = m_data["outcomes"]
-                    outcome1 = next(o for o in outcomes if o['id'] == 0)
-                    outcome2 = next(o for o in outcomes if o['id'] == 1)
-                    m_prices = {
-                        "price1": outcome1.get("price"), "shares1": outcome1.get("shares_held"), "title1": outcome1.get("title"),
-                        "price2": outcome2.get("price"), "shares2": outcome2.get("shares_held"), "title2": outcome2.get("title"),
-                    }
-                except (StopIteration, KeyError, TypeError) as e:
-                    log.error(f"Could not parse outcomes for Myriad market {m_slug}: {e}")
+                # --- NEW: Use the robust real-time price parsing function ---
+                m_prices = m_client.parse_realtime_prices(m_data)
+                if not m_prices:
+                    log.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                     continue
 
                 if m_prices['price1'] is None or m_prices['shares1'] is None:
-                    log.warning(f"Skipping pair for {m_slug} due to missing price/share data in pre-fetched market object.")
+                    log.warning(f"Skipping pair for {m_slug} due to missing price/share data in fresh market object.")
                     continue
                 
                 Q1, Q2 = m_prices['shares1'], m_prices['shares2']

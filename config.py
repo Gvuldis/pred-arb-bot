@@ -23,7 +23,7 @@ COIN_API = os.getenv("COIN_API")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # Fee constants for arbitrage calculation
-FEE_RATE_BODEGA = 0.04  # 4% total fee on Bodega (2% market + 2% protocol)
+FEE_RATE_BODEGA = 0.02  # 4% total fee on Bodega (2% market + 2% protocol)
 FEE_RATE_MYRIAD_BUY = 0.03 # 3% total fee on Myriad buys
 
 # --- Singleton Clients ---

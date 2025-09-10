@@ -182,7 +182,7 @@ if __name__ == "__main__":
     market_to_trade = 247            # <-- !!! REPLACE with the Market ID from Myriad !!!
     outcome_id = 1                   # <-- 1 for YES, 0 for NO
     usdc_amount = 3.0                # <-- The amount of USDC you want to spend
-    shares_amount = 10.5             # <-- The number of shares you want to sell
+    #shares_amount = 10.5             # <-- The number of shares you want to sell
 
     # --- CHOOSE YOUR ACTION (UNCOMMENT ONE LINE) ---
 

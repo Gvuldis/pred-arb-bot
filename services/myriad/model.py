@@ -1,4 +1,3 @@
-# services/myriad/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -100,10 +99,10 @@ def _calculate_trade_outcome_myriad(
 
     total_cost_usd = total_cost_myr_usd + cost_poly_usd
     
-    payout_usd = shares_to_buy_myr
+    payout_usd = shares_to_buy_myr * 1 # 1% redemption fee
     profit_usd = payout_usd - total_cost_usd
     roi = profit_usd / total_cost_usd if total_cost_usd > 0 else 0
-    score = roi * profit_usd
+    score = profit_usd if profit_usd < 0 else roi * profit_usd
     
     return {
         "myriad_shares": shares_to_buy_myr,
@@ -142,10 +141,10 @@ def _calculate_trade_outcome_myriad_fixed_shares(
     
     total_cost_usd = total_cost_myr_usd + cost_poly_usd
     
-    payout_usd = shares_to_buy_myriad
+    payout_usd = shares_to_buy_myriad * 0.99 # 1% redemption fee
     profit_usd = payout_usd - total_cost_usd
     roi = profit_usd / total_cost_usd if total_cost_usd > 0 else 0
-    score = roi * profit_usd
+    score = profit_usd if profit_usd < 0 else roi * profit_usd
     
     return {
         "myriad_shares": shares_to_buy_myriad,
@@ -162,6 +161,60 @@ def _calculate_trade_outcome_myriad_fixed_shares(
         "p_end": compute_price(q1_myr + shares_to_buy_myriad, q2_myr, b)[0]
     }
 
+def _iterative_search(calculation_func, **kwargs):
+    """
+    Performs a three-stage iterative search for the best trade outcome.
+    """
+    all_outcomes = []
+    
+    # Stage 1: Coarse search
+    coarse_adjustments = [i / 100.0 for i in range(0, 51)] # 0.00 to 0.50, step 0.01
+    for adj in coarse_adjustments:
+        outcome = calculation_func(target_adjustment=adj, **kwargs)
+        if outcome:
+            all_outcomes.append(outcome)
+            
+    if not all_outcomes:
+        return None, []
+
+    best_coarse = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+    
+    # Stage 2: Fine search
+    if best_coarse.get('score', -1) > 0:
+        best_adj_coarse = best_coarse['adjustment']
+        fine_start = max(0, best_adj_coarse - 0.01)
+        # Generate 21 steps of 0.001 around the best coarse adjustment
+        fine_adjustments = [fine_start + i * 0.001 for i in range(21)]
+        
+        for adj in fine_adjustments:
+            outcome = calculation_func(target_adjustment=adj, **kwargs)
+            if outcome:
+                all_outcomes.append(outcome)
+
+    if not all_outcomes:
+        return None, []
+        
+    best_fine = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+
+    # Stage 3: Super-fine search
+    if best_fine.get('score', -1) > 0:
+        best_adj_fine = best_fine['adjustment']
+        super_fine_start = max(0, best_adj_fine - 0.001)
+        # Generate 21 steps of 0.0001 around the best fine adjustment
+        super_fine_adjustments = [super_fine_start + i * 0.0001 for i in range(21)]
+
+        for adj in super_fine_adjustments:
+            outcome = calculation_func(target_adjustment=adj, **kwargs)
+            if outcome:
+                all_outcomes.append(outcome)
+
+    if not all_outcomes:
+        return None, []
+
+    best_overall = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+    
+    return best_overall, all_outcomes
+
 def build_arbitrage_table_myriad(
     Q1_MYR: float, Q2_MYR: float,
     ORDER_BOOK_POLY_1: List[Tuple[float, int]], ORDER_BOOK_POLY_2: List[Tuple[float, int]],
@@ -169,7 +222,6 @@ def build_arbitrage_table_myriad(
 ) -> List[Dict[str, Any]]:
     all_opportunities = []
     initial_cost_myr_usd = lmsr_cost(Q1_MYR, Q2_MYR, B)
-    price_adjustments = [i / 100.0 for i in range(0, 26)]
 
     # --- Scenario 1: Buy Outcome 1 on Myriad, hedge with Outcome 2 on Polymarket ---
     if ORDER_BOOK_POLY_2:
@@ -177,26 +229,26 @@ def build_arbitrage_table_myriad(
         p_poly_2_best_ask = ORDER_BOOK_POLY_2[0][0]
         implied_poly_1_price = 1 - p_poly_2_best_ask
         
-        scenario_1_outcomes = []
-        for adj in price_adjustments:
-            target_price = implied_poly_1_price - adj
-            outcome = _calculate_trade_outcome_myriad(
-                q1_myr=Q1_MYR, q2_myr=Q2_MYR, b=B,
-                order_book_poly=ORDER_BOOK_POLY_2, fee_rate=FEE_RATE,
-                initial_cost_myr_usd=initial_cost_myr_usd, target_myriad_price=target_price
-            )
+        def calculate_scenario_1(target_adjustment, **kwargs):
+            target_price = implied_poly_1_price - target_adjustment
+            outcome = _calculate_trade_outcome_myriad(target_myriad_price=target_price, **kwargs)
             if outcome:
-                outcome['adjustment'] = adj
-                scenario_1_outcomes.append(outcome)
+                outcome['adjustment'] = target_adjustment
+            return outcome
+
+        common_args = {
+            'q1_myr': Q1_MYR, 'q2_myr': Q2_MYR, 'b': B,
+            'order_book_poly': ORDER_BOOK_POLY_2, 'fee_rate': FEE_RATE,
+            'initial_cost_myr_usd': initial_cost_myr_usd
+        }
         
-        best_outcome = max(scenario_1_outcomes, key=lambda x: x.get('score', 0)) if scenario_1_outcomes else None
+        best_outcome, all_s1_outcomes = _iterative_search(calculate_scenario_1, **common_args)
         
         final_outcome = None
-        analysis_details = []
+        analysis_details = sorted(all_s1_outcomes, key=lambda x: x.get('adjustment')) if all_s1_outcomes else []
 
         if best_outcome and best_outcome['profit_usd'] > 0:
             final_outcome = best_outcome
-            analysis_details = scenario_1_outcomes
         else:
             final_outcome = _calculate_trade_outcome_myriad_fixed_shares(
                 q1_myr=Q1_MYR, q2_myr=Q2_MYR, b=B,
@@ -216,26 +268,26 @@ def build_arbitrage_table_myriad(
         p_poly_1_best_ask = ORDER_BOOK_POLY_1[0][0]
         implied_poly_2_price = 1 - p_poly_1_best_ask
         
-        scenario_2_outcomes = []
-        for adj in price_adjustments:
-            target_price = implied_poly_2_price - adj
-            outcome = _calculate_trade_outcome_myriad(
-                q1_myr=Q2_MYR, q2_myr=Q1_MYR, b=B, # Flipped Qs for calculation
-                order_book_poly=ORDER_BOOK_POLY_1, fee_rate=FEE_RATE,
-                initial_cost_myr_usd=initial_cost_myr_usd, target_myriad_price=target_price
-            )
+        def calculate_scenario_2(target_adjustment, **kwargs):
+            target_price = implied_poly_2_price - target_adjustment
+            outcome = _calculate_trade_outcome_myriad(target_myriad_price=target_price, **kwargs)
             if outcome:
-                outcome['adjustment'] = adj
-                scenario_2_outcomes.append(outcome)
-        
-        best_outcome = max(scenario_2_outcomes, key=lambda x: x.get('score', 0)) if scenario_2_outcomes else None
+                outcome['adjustment'] = target_adjustment
+            return outcome
+
+        common_args_s2 = {
+            'q1_myr': Q2_MYR, 'q2_myr': Q1_MYR, 'b': B, # Flipped Qs for calculation
+            'order_book_poly': ORDER_BOOK_POLY_1, 'fee_rate': FEE_RATE,
+            'initial_cost_myr_usd': initial_cost_myr_usd
+        }
+
+        best_outcome, all_s2_outcomes = _iterative_search(calculate_scenario_2, **common_args_s2)
         
         final_outcome = None
-        analysis_details = []
+        analysis_details = sorted(all_s2_outcomes, key=lambda x: x.get('adjustment')) if all_s2_outcomes else []
 
         if best_outcome and best_outcome['profit_usd'] > 0:
             final_outcome = best_outcome
-            analysis_details = scenario_2_outcomes
         else:
             final_outcome = _calculate_trade_outcome_myriad_fixed_shares(
                 q1_myr=Q2_MYR, q2_myr=Q1_MYR, b=B, # Flipped

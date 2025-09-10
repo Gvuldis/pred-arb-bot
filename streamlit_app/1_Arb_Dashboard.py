@@ -1,3 +1,4 @@
+# streamlit_app/1_Arb_Dashboard.py
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -546,7 +547,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                             df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'bodega_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)', 'score': 'Score'}, inplace=True)
                             df_display['ROI (%)'] = df_display['ROI (%)'] * 100
                             st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={
-                                "Adj": st.column_config.NumberColumn(format="%.2f"), 
+                                "Adj": st.column_config.NumberColumn(format="%.4f"), 
                                 "Target Price": st.column_config.NumberColumn(format="%.4f"), 
                                 "Shares": st.column_config.NumberColumn(format="%d"), 
                                 "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), 
@@ -564,21 +565,14 @@ if st.button("Check All Manual Pairs for Arbitrage"):
         manual_pairs_myriad_check = load_manual_pairs_myriad()
         if not manual_pairs_myriad_check: st.info("No manual Myriad pairs to check.")
         else:
-            # --- OPTIMIZATION: Fetch all Myriad markets once ---
-            try:
-                all_myriad_markets = m_client.fetch_markets()
-                myriad_market_map = {m['slug']: m for m in all_myriad_markets}
-            except Exception as e:
-                st.error(f"Failed to fetch Myriad markets: {e}")
-                myriad_market_map = {}
-
             prog_myriad = st.progress(0, text="Checking Myriad pairs...")
             myriad_results = []
             for i, (m_slug, p_id, is_flipped, profit_threshold, end_date_override) in enumerate(manual_pairs_myriad_check, start=1):
                 try:
-                    # --- OPTIMIZATION: Use pre-fetched market data ---
-                    m_data = myriad_market_map.get(m_slug)
+                    # --- NEW: Fetch fresh data for each pair individually ---
+                    m_data = m_client.fetch_market_details(m_slug)
                     p_data = p_client.fetch_market(p_id)
+
                     if not all([m_data, p_data]) or m_data.get('state') != 'open' or not p_data.get('active'): continue
                     
                     final_end_date_ms = None
@@ -588,17 +582,10 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         dt_obj = datetime.fromisoformat(m_data["expires_at"].replace('Z', '+00:00'))
                         final_end_date_ms = int(dt_obj.timestamp() * 1000)
 
-                    # --- OPTIMIZATION: Parse prices directly from m_data ---
-                    try:
-                        outcomes = m_data["outcomes"]
-                        outcome1 = next(o for o in outcomes if o['id'] == 0)
-                        outcome2 = next(o for o in outcomes if o['id'] == 1)
-                        m_prices = {
-                            "price1": outcome1.get("price"), "shares1": outcome1.get("shares_held"), "title1": outcome1.get("title"),
-                            "price2": outcome2.get("price"), "shares2": outcome2.get("shares_held"), "title2": outcome2.get("title"),
-                        }
-                    except (StopIteration, KeyError, TypeError) as e:
-                        log.error(f"Could not parse outcomes for Myriad market {m_slug}: {e}")
+                    # --- NEW: Use the robust real-time price parsing function ---
+                    m_prices = m_client.parse_realtime_prices(m_data)
+                    if not m_prices:
+                        st.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                         continue
                     
                     if m_prices['price1'] is None or m_prices['shares1'] is None: continue
@@ -664,7 +651,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                             df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'myriad_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)', 'score': 'Score'}, inplace=True)
                             df_display['ROI (%)'] = df_display['ROI (%)'] * 100
                             st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={
-                                "Adj": st.column_config.NumberColumn(format="%.2f"), 
+                                "Adj": st.column_config.NumberColumn(format="%.4f"), 
                                 "Target Price": st.column_config.NumberColumn(format="%.4f"), 
                                 "Shares": st.column_config.NumberColumn(format="%d"), 
                                 "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), 
