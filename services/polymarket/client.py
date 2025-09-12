@@ -38,6 +38,7 @@ class PolymarketClient:
                 'order_book_yes': [], 'order_book_no': [],
                 'active': False, 'closed': True,
                 'outcome_yes': 'Yes', 'outcome_no': 'No',
+                'token_id_yes': None, 'token_id_no': None,
             }
 
         # Step 2: Identify the two outcome tokens.
@@ -46,22 +47,20 @@ class PolymarketClient:
         token_2 = None
 
         if len(tokens) == 2:
-            # For binary markets, assign tokens.
-            # Try to find "Yes" explicitly for standard markets.
             token_yes_candidate = next((t for t in tokens if t.get("outcome") == "Yes"), None)
-
             if token_yes_candidate:
                 token_1 = token_yes_candidate
-                # The other token is "No"
                 token_2 = next((t for t in tokens if t.get("outcome") != "Yes"), None)
             else:
-                # If no "Yes", assume the first is the "Yes"-equivalent outcome
-                # and the second is the "No"-equivalent outcome.
                 token_1 = tokens[0]
                 token_2 = tokens[1]
 
-        token_1_id = token_1.get("token_id") if token_1 else None
-        token_2_id = token_2.get("token_id") if token_2 else None
+        token_1_id_str = token_1.get("token_id") if token_1 else None
+        token_2_id_str = token_2.get("token_id") if token_2 else None
+        
+        # --- FIX: Removed the unnecessary conversion to hex. ---
+        # token_1_id_hex = hex(int(token_1_id_str)) if token_1_id_str else None
+        # token_2_id_hex = hex(int(token_2_id_str)) if token_2_id_str else None
         
         outcome_1_name = token_1.get("outcome") if token_1 else "Outcome 1"
         outcome_2_name = token_2.get("outcome") if token_2 else "Outcome 2"
@@ -72,23 +71,31 @@ class PolymarketClient:
         # Step 3: Fetch order books for each token ID using the /book endpoint
         order_book_url = f"{self.api_url}/book"
         try:
-            # Fetch order book for the first outcome ("Yes" or equivalent)
-            if token_1_id:
-                params_book_1 = {"token_id": token_1_id}
+            # Fetch order book for the first outcome
+            if token_1_id_str:
+                # --- FINAL FIX: Add side='buy' to the request parameters ---
+                params_book_1 = {"token_id": token_1_id_str, "side": "buy"}
                 book_1_resp = requests.get(order_book_url, params=params_book_1, timeout=10)
-                book_1_resp.raise_for_status()
-                # "asks" are what we can buy from
-                asks_1 = book_1_resp.json().get("asks", [])
-                # Format: list of (price, size) tuples, sorted by price
-                order_book_1 = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks_1 if float(ask['size']) > 0], key=lambda x: x[0])
+                
+                if book_1_resp.status_code == 404:
+                    log.warning(f"Order book for token {token_1_id_str} (buy side) not found (404).")
+                else:
+                    book_1_resp.raise_for_status()
+                    asks_1 = book_1_resp.json().get("asks", [])
+                    order_book_1 = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks_1 if float(ask['size']) > 0], key=lambda x: x[0])
 
-            # Fetch order book for the second outcome ("No" or equivalent)
-            if token_2_id:
-                params_book_2 = {"token_id": token_2_id}
+            # Fetch order book for the second outcome
+            if token_2_id_str:
+                # --- FINAL FIX: Add side='buy' to the request parameters ---
+                params_book_2 = {"token_id": token_2_id_str, "side": "buy"}
                 book_2_resp = requests.get(order_book_url, params=params_book_2, timeout=10)
-                book_2_resp.raise_for_status()
-                asks_2 = book_2_resp.json().get("asks", [])
-                order_book_2 = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks_2 if float(ask['size']) > 0], key=lambda x: x[0])
+
+                if book_2_resp.status_code == 404:
+                    log.warning(f"Order book for token {token_2_id_str} (buy side) not found (404).")
+                else:
+                    book_2_resp.raise_for_status()
+                    asks_2 = book_2_resp.json().get("asks", [])
+                    order_book_2 = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks_2 if float(ask['size']) > 0], key=lambda x: x[0])
 
         except (requests.exceptions.RequestException, ValueError, TypeError) as e:
             log.error(f"Failed to fetch or parse order book for tokens in market {condition_id}: {e}")
@@ -97,7 +104,6 @@ class PolymarketClient:
         price_1 = order_book_1[0][0] if order_book_1 else None
         price_2 = order_book_2[0][0] if order_book_2 else None
 
-        # The rest of the system expects 'yes' and 'no' keys. We will map outcome 1 to 'yes' and 2 to 'no'.
         return {
             'condition_id': condition_id,
             'question': market_data.get('question'),
@@ -105,8 +111,11 @@ class PolymarketClient:
             'price_no': price_2,
             'order_book_yes': order_book_1,
             'order_book_no': order_book_2,
-            'outcome_yes': outcome_1_name, # To know what "yes" means
-            'outcome_no': outcome_2_name,   # To know what "no" means
+            'outcome_yes': outcome_1_name,
+            'outcome_no': outcome_2_name,
+            # --- FIX: Use the original decimal string token IDs ---
+            'token_id_yes': token_1_id_str,
+            'token_id_no': token_2_id_str,
             'active': market_data.get('active', False),
             'closed': market_data.get('closed', True),
         }

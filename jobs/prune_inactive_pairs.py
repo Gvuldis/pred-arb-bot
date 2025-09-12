@@ -77,7 +77,7 @@ def prune_inactive_myriad_pairs():
         log.error(f"Pruner failed to fetch Myriad markets: {e}. Aborting.")
         return
 
-    for m_slug, p_id, _, _, _ in manual_pairs:
+    for m_slug, p_id, _, _, _, _ in manual_pairs: # Handle new is_autotrade_safe column
         try:
             # 1. Check Myriad market state using pre-fetched data
             myriad_market = myriad_market_map.get(m_slug)

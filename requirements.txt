@@ -6,3 +6,5 @@ apscheduler
 python-dotenv
 blockfrost-python
 python-dateutil
+py-clob-client
+web3

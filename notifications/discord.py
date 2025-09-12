@@ -139,3 +139,23 @@ class DiscordNotifier:
             f"This could indicate a new opportunity or market shift."
         )
         self.send(content)
+
+    # --- NEW NOTIFICATIONS FOR ARB-EXECUTOR ---
+    def notify_autotrade_success(self, market_title: str, profit: float, shares: float):
+        content = f"✅ @everyone **AUTOMATED ARB EXECUTED**: {market_title}. **Profit**: ${profit:.2f}. **Shares**: {shares}"
+        self.send(content)
+    
+    def notify_autotrade_failure(self, market_title: str, reason: str, status: str):
+        content = f"❌ **AUTOMATED ARB FAILED**: {market_title}.\n**Status**: `{status}`\n**Reason**: {reason}"
+        self.send(content)
+        
+    def notify_autotrade_panic(self, market_title: str, error_msg: str):
+        content = (f"🚨 @everyone **CRITICAL FAILURE: HEDGE FAILED** on {market_title}.\n"
+                   f"Succeeded on Polymarket, failed on Myriad. **ATTEMPTING TO UNWIND POSITION.**\n"
+                   f"MANUAL INTERVENTION MAY BE REQUIRED.\n"
+                   f"Error: {error_msg}")
+        self.send(content)
+
+    def notify_autotrade_dry_run(self, market_title: str, profit: float):
+        content = f"DRY RUN: Would have executed arb on **{market_title}** for **${profit:.2f}** profit."
+        self.send(content)

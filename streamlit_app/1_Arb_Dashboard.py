@@ -1,4 +1,3 @@
-# streamlit_app/1_Arb_Dashboard.py
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -158,7 +157,7 @@ with cal_myriad:
             st.info("No manually matched Myriad pairs found.")
         else:
             matched_markets = []
-            for m_slug, p_id, _, _, _ in manual_pairs_myriad_cal:
+            for m_slug, p_id, _, _, _, _ in manual_pairs_myriad_cal:
                 if m_slug in myriad_map:
                     market_info = myriad_map[m_slug]
                     deadline_str, remaining_str, deadline_ts = format_deadline_iso(market_info.get('expires_at'))
@@ -318,7 +317,8 @@ with tab_myriad:
             st.write("")
             if st.button("Add Myriad Pair"):
                 if myriad_slug and poly_id_myriad:
-                    save_manual_pair_myriad(myriad_slug, poly_id_myriad, 0, 25.0, None)
+                    # Default is_autotrade_safe to 0 (False)
+                    save_manual_pair_myriad(myriad_slug, poly_id_myriad, 0, 10.0, None, 0)
                     if notifier: notifier.notify_manual_pair("Myriad", myriad_slug, poly_id_myriad)
                     st.success("Myriad pair added!"); st.rerun()
                 else: st.warning("Please provide both market selections.")
@@ -327,8 +327,8 @@ with tab_myriad:
     if manual_pairs_myriad:
         st.subheader("📝 Edit Saved Myriad Pair")
         myriad_pair_options = {
-            f"{myriad_map.get(m_slug, {'name': 'Unknown'})['name']} ({m_slug})": (m_slug, p_id, is_flipped, profit_threshold, end_date_override)
-            for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_myriad
+            f"{myriad_map.get(m_slug, {'name': 'Unknown'})['name']} ({m_slug})": (m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe)
+            for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs_myriad
         }
         
         sorted_myriad_options = sorted(myriad_pair_options.keys())
@@ -339,7 +339,7 @@ with tab_myriad:
         )
         
         if selected_myriad_pair_label != "-- Select a Pair --":
-            m_slug, p_id, is_flipped, profit_threshold, end_date_override = myriad_pair_options[selected_myriad_pair_label]
+            m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe = myriad_pair_options[selected_myriad_pair_label]
             m_url = f"https://app.myriad.social/markets/{m_slug}"
             p_url = f"https://polymarket.com/event/{p_id}"
             
@@ -365,17 +365,19 @@ with tab_myriad:
                     default_date = dt_obj.date()
                     default_time = dt_obj.time()
                 
-                c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 1, 2])
-                new_threshold = c1.number_input("Profit Alert ($)", value=float(profit_threshold), min_value=0.0, step=5.0)
+                c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 1, 1, 2])
+                new_threshold = c1.number_input("Profit Alert ($)", value=float(profit_threshold), min_value=0.0, step=1.0)
                 end_date_input = c2.date_input("End Date (UTC)", value=default_date, help="Override end date for APY. Clear to use API default.")
                 end_time_input = c3.time_input("End Time (UTC)", value=default_time, help="Override end time for APY.")
                 is_flipped_new = c4.checkbox("Flipped", value=bool(is_flipped))
-                if c5.form_submit_button("Update Pair"):
+                is_autotrade_safe_new = c5.checkbox("🤖 Auto", value=bool(is_autotrade_safe), help="Enable automated trading for this pair.")
+
+                if c6.form_submit_button("Update Pair"):
                     new_override_ts = None
                     if end_date_input and end_time_input:
                         combined_dt = datetime.combine(end_date_input, end_time_input, tzinfo=timezone.utc)
                         new_override_ts = int(combined_dt.timestamp() * 1000)
-                    save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts)
+                    save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts, int(is_autotrade_safe_new))
                     st.success(f"Pair {m_slug}/{p_id} updated."); time.sleep(1); st.rerun()
 
     st.subheader("🆕 Pending New Myriad Markets")
@@ -397,7 +399,7 @@ with tab_myriad:
                 st.write("")
                 if st.button("Match", key=f"match_myriad_{m['market_id']}"):
                     if poly_id:
-                        save_manual_pair_myriad(m["market_slug"], poly_id, 0, 25.0, None)
+                        save_manual_pair_myriad(m["market_slug"], poly_id, 0, 10.0, None, 0)
                         remove_new_myriad_market(m["market_id"])
                         if notifier: notifier.notify_manual_pair("Myriad", m['market_slug'], poly_id)
                         st.success("Matched!"); st.rerun()
@@ -517,6 +519,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     apy = summary.get('apy', 0)
                     threshold = opp['profit_threshold']
 
+                    # --- FIX: Replaced unsafe_html with unsafe_allow_html ---
                     if profit > threshold and roi > 0.05 and apy >= 0.50:
                         st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
@@ -567,7 +570,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
         else:
             prog_myriad = st.progress(0, text="Checking Myriad pairs...")
             myriad_results = []
-            for i, (m_slug, p_id, is_flipped, profit_threshold, end_date_override) in enumerate(manual_pairs_myriad_check, start=1):
+            for i, (m_slug, p_id, is_flipped, profit_threshold, end_date_override, _) in enumerate(manual_pairs_myriad_check, start=1):
                 try:
                     # --- NEW: Fetch fresh data for each pair individually ---
                     m_data = m_client.fetch_market_details(m_slug)
@@ -622,6 +625,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     profit, roi, apy = summary.get('profit_usd', 0), summary.get('roi', 0), summary.get('apy', 0)
                     threshold = opp['profit_threshold']
 
+                    # --- FIX: Replaced unsafe_html with unsafe_allow_html ---
                     if profit > threshold and roi > 0.05 and apy >= 0.50:
                         st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:

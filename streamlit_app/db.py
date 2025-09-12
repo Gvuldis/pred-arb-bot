@@ -3,6 +3,8 @@ from pathlib import Path
 import time
 from contextlib import contextmanager
 import logging
+import json
+from typing import Optional, Dict
 
 log = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent.parent / "market_data.db"
@@ -12,7 +14,7 @@ def get_conn():
     """Context manager for database connections."""
     conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10) # Added timeout
         conn.row_factory = sqlite3.Row
         yield conn
     finally:
@@ -55,7 +57,7 @@ def init_db():
           ignored_at   INTEGER
         )""")
 
-        # --- Myriad Tables (NEW) ---
+        # --- Myriad Tables ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS myriad_markets (
           id         INTEGER PRIMARY KEY,
@@ -107,25 +109,53 @@ def init_db():
           value  TEXT NOT NULL
         )""")
 
-        # --- Schema Migration for manual_pairs table ---
+        # --- NEW TABLES FOR ARB-EXECUTOR ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS automated_trades_log (
+            trade_id TEXT PRIMARY KEY,
+            attempt_timestamp_utc TEXT NOT NULL,
+            myriad_slug TEXT,
+            polymarket_condition_id TEXT,
+            status TEXT NOT NULL,
+            status_message TEXT,
+            planned_poly_shares REAL,
+            planned_myriad_shares REAL,
+            executed_poly_shares REAL,
+            executed_myriad_shares REAL,
+            poly_tx_hash TEXT,
+            myriad_tx_hash TEXT,
+            final_profit_usd REAL,
+            log_details TEXT
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_cooldowns (
+            market_key TEXT PRIMARY KEY,
+            last_trade_attempt_utc TEXT NOT NULL
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS arb_opportunities (
+            opportunity_id TEXT PRIMARY KEY,
+            timestamp_utc TEXT NOT NULL,
+            message_json TEXT NOT NULL
+        )""")
+
+        # --- Schema Migrations ---
+        # Add 'end_date_override' to manual_pairs
         cur.execute("PRAGMA table_info(manual_pairs)")
         columns = [row['name'] for row in cur.fetchall()]
-        if 'is_flipped' not in columns:
-            log.info("Migration: Adding 'is_flipped' to 'manual_pairs'.")
-            cur.execute("ALTER TABLE manual_pairs ADD COLUMN is_flipped INTEGER NOT NULL DEFAULT 0")
-        if 'profit_threshold_usd' not in columns:
-            log.info("Migration: Adding 'profit_threshold_usd' to 'manual_pairs'.")
-            cur.execute("ALTER TABLE manual_pairs ADD COLUMN profit_threshold_usd REAL NOT NULL DEFAULT 25.0")
         if 'end_date_override' not in columns:
             log.info("Migration: Adding 'end_date_override' to 'manual_pairs'.")
             cur.execute("ALTER TABLE manual_pairs ADD COLUMN end_date_override INTEGER")
 
-        # --- Schema Migration for manual_pairs_myriad table ---
+        # Add 'end_date_override' and 'is_autotrade_safe' to manual_pairs_myriad
         cur.execute("PRAGMA table_info(manual_pairs_myriad)")
         columns_myriad = [row['name'] for row in cur.fetchall()]
         if 'end_date_override' not in columns_myriad:
             log.info("Migration: Adding 'end_date_override' to 'manual_pairs_myriad'.")
             cur.execute("ALTER TABLE manual_pairs_myriad ADD COLUMN end_date_override INTEGER")
+        if 'is_autotrade_safe' not in columns_myriad:
+            log.info("Migration: Adding 'is_autotrade_safe' to 'manual_pairs_myriad'.")
+            cur.execute("ALTER TABLE manual_pairs_myriad ADD COLUMN is_autotrade_safe INTEGER NOT NULL DEFAULT 0")
 
         conn.commit()
         log.info("Database initialization/migration check complete.")
@@ -165,7 +195,7 @@ def ignore_bodega_market(market_id: str):
         conn.execute("DELETE FROM new_bodega_markets WHERE market_id=?", (market_id,))
         conn.commit()
 
-# --- Myriad Functions (NEW) ---
+# --- Myriad Functions ---
 def save_myriad_markets(markets: list):
     now = int(time.time())
     data = [(m.get("id"), m.get("slug"), m.get("title"), m.get("expires_at"), now) for m in markets]
@@ -228,15 +258,15 @@ def delete_manual_pair(bodega_id: str, poly_id: str):
         conn.execute("DELETE FROM manual_pairs WHERE bodega_id = ? AND poly_condition_id = ?", (bodega_id, poly_id))
         conn.commit()
 
-def save_manual_pair_myriad(myriad_slug: str, poly_id: str, is_flipped: int, profit_threshold_usd: float, end_date_override: int = None):
+def save_manual_pair_myriad(myriad_slug: str, poly_id: str, is_flipped: int, profit_threshold_usd: float, end_date_override: Optional[int], is_autotrade_safe: int):
     with get_conn() as conn:
-        conn.execute("INSERT OR REPLACE INTO manual_pairs_myriad (myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override) VALUES (?, ?, ?, ?, ?)", (myriad_slug, poly_id, is_flipped, profit_threshold_usd, end_date_override))
+        conn.execute("INSERT OR REPLACE INTO manual_pairs_myriad (myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override, is_autotrade_safe) VALUES (?, ?, ?, ?, ?, ?)", (myriad_slug, poly_id, is_flipped, profit_threshold_usd, end_date_override, is_autotrade_safe))
         conn.commit()
 
 def load_manual_pairs_myriad() -> list[tuple]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override FROM manual_pairs_myriad").fetchall()
-        return [(r["myriad_slug"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"], r["end_date_override"]) for r in rows]
+        rows = conn.execute("SELECT myriad_slug, poly_condition_id, is_flipped, profit_threshold_usd, end_date_override, is_autotrade_safe FROM manual_pairs_myriad").fetchall()
+        return [(r["myriad_slug"], r["poly_condition_id"], r["is_flipped"], r["profit_threshold_usd"], r["end_date_override"], r["is_autotrade_safe"]) for r in rows]
 
 def delete_manual_pair_myriad(myriad_slug: str, poly_id: str):
     with get_conn() as conn:
@@ -269,3 +299,68 @@ def get_config_value(key: str, default: str = None) -> str:
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM app_config WHERE key = ?", (key,)).fetchone()
         return row['value'] if row else default
+
+# --- Arb Executor Functions ---
+
+def add_arb_opportunity(opportunity: Dict):
+    """Adds a new arbitrage opportunity to the queue."""
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO arb_opportunities (opportunity_id, timestamp_utc, message_json) VALUES (?, ?, ?)",
+                     (opportunity['opportunity_id'], opportunity['timestamp_utc'], json.dumps(opportunity)))
+        conn.commit()
+        log.info(f"Queued arbitrage opportunity {opportunity['opportunity_id']} for {opportunity['market_identifiers']['myriad_slug']}")
+
+def pop_arb_opportunity() -> Optional[Dict]:
+    """Atomically retrieves and deletes the oldest opportunity from the queue."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            row = cur.execute("SELECT opportunity_id, message_json FROM arb_opportunities ORDER BY timestamp_utc ASC LIMIT 1").fetchone()
+            if row:
+                opp_id = row['opportunity_id']
+                message_json = row['message_json']
+                cur.execute("DELETE FROM arb_opportunities WHERE opportunity_id = ?", (opp_id,))
+                conn.commit()
+                log.info(f"Popped opportunity {opp_id} from queue.")
+                return json.loads(message_json)
+            else:
+                conn.commit() # release lock
+                return None
+        except Exception as e:
+            conn.rollback()
+            log.error(f"Error popping opportunity from queue: {e}", exc_info=True)
+            return None
+
+def log_trade_attempt(trade_log: Dict):
+    """Inserts or replaces a record in the automated_trades_log."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO automated_trades_log (
+                trade_id, attempt_timestamp_utc, myriad_slug, polymarket_condition_id,
+                status, status_message, planned_poly_shares, planned_myriad_shares,
+                executed_poly_shares, executed_myriad_shares, poly_tx_hash,
+                myriad_tx_hash, final_profit_usd, log_details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade_log.get('trade_id'), trade_log.get('attempt_timestamp_utc'),
+            trade_log.get('myriad_slug'), trade_log.get('polymarket_condition_id'),
+            trade_log.get('status'), trade_log.get('status_message'),
+            trade_log.get('planned_poly_shares'), trade_log.get('planned_myriad_shares'),
+            trade_log.get('executed_poly_shares'), trade_log.get('executed_myriad_shares'),
+            trade_log.get('poly_tx_hash'), trade_log.get('myriad_tx_hash'),
+            trade_log.get('final_profit_usd'), json.dumps(trade_log.get('log_details'))
+        ))
+        conn.commit()
+
+def get_market_cooldown(market_key: str) -> Optional[str]:
+    """Gets the last trade attempt timestamp for a market."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT last_trade_attempt_utc FROM market_cooldowns WHERE market_key = ?", (market_key,)).fetchone()
+        return row['last_trade_attempt_utc'] if row else None
+
+def update_market_cooldown(market_key: str, timestamp_utc: str):
+    """Updates the cooldown timestamp for a market."""
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO market_cooldowns (market_key, last_trade_attempt_utc) VALUES (?, ?)", (market_key, timestamp_utc))
+        conn.commit()

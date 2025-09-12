@@ -13,18 +13,18 @@ host: str = "https://clob.polymarket.com" # Testnet (if available, check Polymar
 # IMPORTANT: Replace with your actual private key. DO NOT SHARE THIS!
 # For security, consider loading this from an environment variable:
 # key: str = os.environ.get("POLYMARKET_PRIVATE_KEY")
-key: str = "" # <--- YOUR PRIVATE KEY HERE
+key: str = os.getenv("POLYMARKET_PRIVATE_KEY")# <--- YOUR PRIVATE KEY HERE
 
 chain_id: int = 137  # Polygon Mainnet
 # Polymarket Proxy Address if you login with Email/Magic or Browser Wallet.
 # key: str = os.environ.get("POLYMARKET_PROXY_ADDRESS")
-POLYMARKET_PROXY_ADDRESS: str = '' # <--- YOUR POLYMARKET PROXY ADDRESS HERE (if applicable)
+POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS") # <--- YOUR POLYMARKET PROXY ADDRESS HERE (if applicable)
 
 # --- Market Specifics ---
 # Replace with the actual Token ID for the market you want to trade.
 # You can find this using the Polymarket Markets API:
 # https://docs.polymarket.com/developers/gamma-markets-api/get-markets
-TARGET_TOKEN_ID: str = "" # <--- TARGET TOKEN ID HERE (e.g., '0x...')
+TARGET_TOKEN_ID: str = "98472312499561003106951400651225799090327453571676668952160833455446414876451" # <--- TARGET TOKEN ID HERE (e.g., '0x...')
 
 # --- Order Parameters ---
 # For buying 5 'YES' tokens at a price of 0.50 USDC each (or whatever the token represents)

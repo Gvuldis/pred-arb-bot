@@ -1,5 +1,6 @@
-# auto_matcher.py
 import logging
+import uuid
+import json
 from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timezone
 from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log
@@ -10,7 +11,8 @@ from streamlit_app.db import (
     load_manual_pairs, load_manual_pairs_myriad,
     save_polymarkets,
     load_probability_watches, delete_probability_watch,
-    get_config_value, save_myriad_markets
+    get_config_value, save_myriad_markets,
+    add_arb_opportunity
 )
 from matching.fuzzy import fetch_all_polymarket_clob_markets
 from services.polymarket.model import build_arbitrage_table, infer_b
@@ -84,10 +86,9 @@ def run_bodega_arb_check():
             try:
                 log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
-                # --- OPTIMIZATION: Use pre-fetched market config ---
                 pool = bodega_market_map.get(b_id)
                 if not pool:
-                    log.warning(f"Skipping pair ({b_id}, {p_id}) because Bodega market config was not found in active markets.")
+                    log.warning(f"Skipping pair ({b_id}, {p_id}) because Bodega market config was not found.")
                     continue
                 
                 p_data = p_client.fetch_market(p_id)
@@ -96,7 +97,6 @@ def run_bodega_arb_check():
                     log.warning(f"Skipping pair ({b_id}, {p_id}) because Polymarket market is not active.")
                     continue
                 
-                # Determine the end date for APY calculation
                 market_end_date_ms = pool.get('deadline')
                 final_end_date_ms = end_date_override if end_date_override else market_end_date_ms
 
@@ -124,7 +124,7 @@ def run_bodega_arb_check():
                     
                     if summary.get("profit_usd", 0) > profit_threshold and \
                        summary.get("roi", 0) > 0.05 and \
-                       summary.get("apy", 0) >= 0.50:
+                       summary.get("apy", 0) >= 1:
                         summary['polymarket_side'] = poly_outcome_name_yes if summary['polymarket_side'] == 'YES' else poly_outcome_name_no
                         pair_desc = f"{pool['name']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, b_id, p_id))
@@ -153,11 +153,10 @@ def run_myriad_arb_check():
             return
 
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
-        for m_slug, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
+        for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs:
             try:
-                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
+                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id}, Flipped={is_flipped}, Autotradeable={is_autotrade_safe} ---")
 
-                # --- NEW: Fetch Myriad and Polymarket data fresh for EACH pair ---
                 m_data = m_client.fetch_market_details(m_slug)
                 p_data = p_client.fetch_market(p_id)
 
@@ -165,20 +164,17 @@ def run_myriad_arb_check():
                     log.warning(f"Skipping pair ({m_slug}, {p_id}) due to inactive/missing market data.")
                     continue
                 
-                # Determine the end date for APY calculation
+                market_expiry_utc = m_data.get("expires_at")
                 final_end_date_ms = None
                 if end_date_override:
                     final_end_date_ms = end_date_override
-                else:
-                    expires_at_str = m_data.get("expires_at")
-                    if expires_at_str:
-                        try:
-                            dt_object = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-                            final_end_date_ms = int(dt_object.timestamp() * 1000)
-                        except (ValueError, TypeError):
-                            log.warning(f"Could not parse Myriad end date: {expires_at_str}")
+                elif market_expiry_utc:
+                    try:
+                        dt_object = datetime.fromisoformat(market_expiry_utc.replace('Z', '+00:00'))
+                        final_end_date_ms = int(dt_object.timestamp() * 1000)
+                    except (ValueError, TypeError):
+                        log.warning(f"Could not parse Myriad end date: {market_expiry_utc}")
 
-                # --- NEW: Use the robust real-time price parsing function ---
                 m_prices = m_client.parse_realtime_prices(m_data)
                 if not m_prices:
                     log.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
@@ -202,15 +198,75 @@ def run_myriad_arb_check():
 
                 for summary in pair_opportunities:
                     summary['apy'] = calculate_apy(summary.get('roi', 0), final_end_date_ms)
+                    
+                    # --- BUG FIX: Correct the Polymarket side label if the market is flipped ---
+                    if is_flipped:
+                        current_poly_side = summary['polymarket_side']
+                        summary['polymarket_side'] = 2 if current_poly_side == 1 else 1
 
                     if summary.get("profit_usd", 0) > profit_threshold and \
-                       summary.get("roi", 0) > 0.05 and \
-                       summary.get("apy", 0) >= 0.50:
+                       summary.get("roi", 0) > 0.015 and \
+                       summary.get("apy", 0) >= 0.10:
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
                         pair_desc = f"{m_data['title']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, m_slug, p_id))
 
+                        if is_autotrade_safe:
+                            try:
+                                polymarket_token_id_buy = None
+                                polymarket_limit_price = None
+                                if summary['polymarket_side'] == 1 and p_data.get('order_book_yes'):
+                                    polymarket_token_id_buy = p_data.get('token_id_yes')
+                                    polymarket_limit_price = p_data['order_book_yes'][0][0]
+                                elif summary['polymarket_side'] == 2 and p_data.get('order_book_no'):
+                                    polymarket_token_id_buy = p_data.get('token_id_no')
+                                    polymarket_limit_price = p_data['order_book_no'][0][0]
+
+                                if not polymarket_token_id_buy or not polymarket_limit_price:
+                                    log.warning(f"Could not determine Polymarket token ID or limit price for autotrade on {m_slug}. Skipping queue.")
+                                    continue
+
+                                opportunity_message = {
+                                    "opportunity_id": str(uuid.uuid4()),
+                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                    "platform": "Myriad",
+                                    "market_identifiers": {
+                                        "myriad_slug": m_slug,
+                                        "myriad_market_id": m_data.get('id'),
+                                        "polymarket_condition_id": p_id,
+                                        "polymarket_token_id_buy": polymarket_token_id_buy,
+                                        "is_flipped": bool(is_flipped)
+                                    },
+                                    "market_details": {
+                                        "myriad_title": m_data.get('title'),
+                                        "polymarket_question": p_data.get('question'),
+                                        "market_expiry_utc": market_expiry_utc
+                                    },
+                                    "trade_plan": {
+                                        "direction": summary.get('direction'),
+                                        "myriad_side_to_buy": summary.get('myriad_side'),
+                                        "polymarket_side_to_buy": summary.get('polymarket_side'),
+                                        "myriad_shares_to_buy": summary.get('myriad_shares'),
+                                        "estimated_myriad_cost_usd": summary.get('cost_myr_usd'),
+                                        "polymarket_shares_to_buy": summary.get('polymarket_shares'),
+                                        "polymarket_limit_price": polymarket_limit_price,
+                                        "estimated_polymarket_cost_usd": summary.get('cost_poly_usd')
+                                    },
+                                    "profitability_metrics": {
+                                        "estimated_profit_usd": summary.get('profit_usd'),
+                                        "roi": summary.get('roi'),
+                                        "apy": summary.get('apy')
+                                    },
+                                    "amm_parameters": {
+                                        "myriad_q1": Q1,
+                                        "myriad_q2": Q2,
+                                        "myriad_inferred_b": inferred_B
+                                    }
+                                }
+                                add_arb_opportunity(opportunity_message)
+                            except Exception as e:
+                                log.error(f"Failed to build and queue autotrade opportunity for {m_slug}: {e}", exc_info=True)
             except Exception as e:
                 log.error(f"Myriad arb check for pair ({m_slug}, {p_id}) failed: {e}", exc_info=True)
 
