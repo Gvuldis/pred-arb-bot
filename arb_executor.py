@@ -29,8 +29,8 @@ load_dotenv()
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "DRY_RUN")
 LIMITED_LIVE_CAP_USD = float(os.getenv("LIMITED_LIVE_CAP_USD", "10.0"))
 MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "5.00"))
-MIN_ROI = float(os.getenv("MIN_ROI", "0.015"))
-MIN_APY = float(os.getenv("MIN_APY", "0.2"))
+MIN_ROI = float(os.getenv("MIN_ROI", "0.025"))
+MIN_APY = float(os.getenv("MIN_APY", "0.5"))
 
 # --- Safety Parameters ---
 MIN_ETH_BALANCE = 0.0003
