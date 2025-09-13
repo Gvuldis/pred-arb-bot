@@ -34,7 +34,7 @@ MIN_APY = float(os.getenv("MIN_APY", "0.5"))
 
 # --- Safety Parameters ---
 MIN_ETH_BALANCE = 0.0003
-MARKET_EXPIRY_BUFFER_MINUTES = 5
+MARKET_EXPIRY_BUFFER_MINUTES = 180
 TRADE_COOLDOWN_MINUTES = 1
 # LEG1_TIMEOUT_SECONDS = 60 # No longer needed with FAK orders
 
