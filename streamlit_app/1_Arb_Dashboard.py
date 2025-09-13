@@ -215,57 +215,53 @@ with tab_bodega:
     
     manual_pairs_bodega = load_manual_pairs()
     if manual_pairs_bodega:
-        st.subheader("📝 Edit Saved Bodega Pair")
-        pair_options = {
-            f"{bodega_map.get(b_id, {'name': 'Unknown'})['name']} ({b_id})": (b_id, p_id, is_flipped, profit_threshold, end_date_override)
-            for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_bodega
-        }
-        
-        sorted_options = sorted(pair_options.keys())
-        selected_pair_label = st.selectbox(
-            "Select a pair to view or edit:",
-            options=["-- Select a Pair --"] + sorted_options,
-            key="bodega_pair_selector"
-        )
+        with st.expander("📝 Edit Saved Bodega Pairs"):
+            sorted_pairs_bodega = sorted(
+                [(f"{bodega_map.get(b_id, {'name': 'Unknown'})['name']} ({b_id})", b_id, p_id, is_flipped, profit_threshold, end_date_override)
+                 for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs_bodega],
+                key=lambda x: x[0]
+            )
 
-        if selected_pair_label != "-- Select a Pair --":
-            b_id, p_id, is_flipped, profit_threshold, end_date_override = pair_options[selected_pair_label]
-            b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
-            p_url = f"https://polymarket.com/event/{p_id}"
-            
-            c1_disp, c2_disp = st.columns([12, 1])
-            with c1_disp:
-                st.markdown(f"• [Bodega Link]({b_url}) ↔ [Polymarket Link]({p_url})")
-            with c2_disp:
-                if st.button("❌", key=f"del_pair_bodega_{b_id}_{p_id}", help="Delete this pair"):
-                    delete_manual_pair(b_id, p_id)
-                    st.rerun()
-
-            with st.form(key=f"form_pair_bodega_{b_id}_{p_id}"):
-                default_date, default_time = None, None
-                api_date_ms = bodega_map.get(b_id, {}).get('deadline')
-                display_date_ts = end_date_override if end_date_override else api_date_ms
-                if display_date_ts:
-                    dt_obj = datetime.fromtimestamp(display_date_ts / 1000, tz=timezone.utc)
-                    default_date = dt_obj.date()
-                    default_time = dt_obj.time()
-
-                c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 1, 2])
-                new_threshold = c1.number_input("Profit Alert ($)", value=float(profit_threshold), min_value=0.0, step=5.0, help="Min USD profit for an alert.")
-                end_date_input = c2.date_input("End Date (UTC)", value=default_date, help="Override end date for APY. Clear to use API default.")
-                end_time_input = c3.time_input("End Time (UTC)", value=default_time, help="Override end time for APY.")
-                is_flipped_new = c4.checkbox("Flipped", value=bool(is_flipped), help="'Yes' on Bodega maps to 'No' on Polymarket.")
+            for display_name, b_id, p_id, is_flipped, profit_threshold, end_date_override in sorted_pairs_bodega:
+                st.markdown(f"**{display_name}**")
                 
-                if c5.form_submit_button("Update Pair"):
-                    new_override_ts = None
-                    if end_date_input and end_time_input:
-                        combined_dt = datetime.combine(end_date_input, end_time_input, tzinfo=timezone.utc)
-                        new_override_ts = int(combined_dt.timestamp() * 1000)
+                b_url = f"{BODEGA_API.replace('/api', '')}/marketDetails?id={b_id}"
+                p_url = f"https://polymarket.com/event/{p_id}"
+                
+                c1_disp, c2_disp = st.columns([12, 1])
+                with c1_disp:
+                    st.markdown(f"• [Bodega Link]({b_url}) ↔ [Polymarket Link]({p_url})")
+                with c2_disp:
+                    if st.button("❌", key=f"del_pair_bodega_{b_id}_{p_id}", help="Delete this pair"):
+                        delete_manual_pair(b_id, p_id)
+                        st.rerun()
+
+                with st.form(key=f"form_pair_bodega_{b_id}_{p_id}"):
+                    default_date, default_time = None, None
+                    api_date_ms = bodega_map.get(b_id, {}).get('deadline')
+                    display_date_ts = end_date_override if end_date_override else api_date_ms
+                    if display_date_ts:
+                        dt_obj = datetime.fromtimestamp(display_date_ts / 1000, tz=timezone.utc)
+                        default_date = dt_obj.date()
+                        default_time = dt_obj.time()
+
+                    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 1, 2])
+                    new_threshold = c1.number_input("Profit Alert ($)", value=float(profit_threshold), min_value=0.0, step=5.0, help="Min USD profit for an alert.", key=f"threshold_bodega_{b_id}_{p_id}")
+                    end_date_input = c2.date_input("End Date (UTC)", value=default_date, help="Override end date for APY. Clear to use API default.", key=f"date_bodega_{b_id}_{p_id}")
+                    end_time_input = c3.time_input("End Time (UTC)", value=default_time, help="Override end time for APY.", key=f"time_bodega_{b_id}_{p_id}")
+                    is_flipped_new = c4.checkbox("Flipped", value=bool(is_flipped), help="'Yes' on Bodega maps to 'No' on Polymarket.", key=f"flipped_bodega_{b_id}_{p_id}")
                     
-                    save_manual_pair(b_id, p_id, int(is_flipped_new), float(new_threshold), new_override_ts)
-                    st.success(f"Pair {b_id}/{p_id} updated.")
-                    time.sleep(1)
-                    st.rerun()
+                    if c5.form_submit_button("Update Pair"):
+                        new_override_ts = None
+                        if end_date_input and end_time_input:
+                            combined_dt = datetime.combine(end_date_input, end_time_input, tzinfo=timezone.utc)
+                            new_override_ts = int(combined_dt.timestamp() * 1000)
+                        
+                        save_manual_pair(b_id, p_id, int(is_flipped_new), float(new_threshold), new_override_ts)
+                        st.success(f"Pair {b_id}/{p_id} updated.")
+                        time.sleep(1)
+                        st.rerun()
+                st.markdown("---")
 
     st.subheader("🆕 Pending New Bodega Markets")
     pending_bodega = load_new_bodega_markets()
@@ -326,60 +322,57 @@ with tab_myriad:
 
     manual_pairs_myriad = load_manual_pairs_myriad()
     if manual_pairs_myriad:
-        st.subheader("📝 Edit Saved Myriad Pair")
-        myriad_pair_options = {
-            f"{myriad_map.get(m_slug, {'name': 'Unknown'})['name']} ({m_slug})": (m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe)
-            for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs_myriad
-        }
-        
-        sorted_myriad_options = sorted(myriad_pair_options.keys())
-        selected_myriad_pair_label = st.selectbox(
-            "Select a pair to view or edit:",
-            options=["-- Select a Pair --"] + sorted_myriad_options,
-            key="myriad_pair_selector"
-        )
-        
-        if selected_myriad_pair_label != "-- Select a Pair --":
-            m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe = myriad_pair_options[selected_myriad_pair_label]
-            m_url = f"https://app.myriad.social/markets/{m_slug}"
-            p_url = f"https://polymarket.com/event/{p_id}"
-            
-            c1_disp_m, c2_disp_m = st.columns([12,1])
-            with c1_disp_m:
-                st.markdown(f"• [Myriad Link]({m_url}) ↔ [Polymarket Link]({p_url})")
-            with c2_disp_m:
-                if st.button("❌", key=f"del_pair_myriad_{m_slug}_{p_id}", help="Delete this pair"):
-                    delete_manual_pair_myriad(m_slug, p_id)
-                    st.rerun()
+        with st.expander("📝 Edit Saved Myriad Pairs"):
+            sorted_pairs_myriad = sorted(
+                [(f"{myriad_map.get(m_slug, {'name': 'Unknown'})['name']} ({m_slug})", m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe)
+                 for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs_myriad],
+                key=lambda x: x[0]
+            )
 
-            with st.form(key=f"form_pair_myriad_{m_slug}_{p_id}"):
-                default_date, default_time = None, None
-                api_date_str = myriad_map.get(m_slug, {}).get('expires_at')
-                final_ts = end_date_override
-                if not final_ts and api_date_str:
-                    try:
-                        dt_obj = datetime.fromisoformat(api_date_str.replace('Z', '+00:00'))
-                        final_ts = int(dt_obj.timestamp() * 1000)
-                    except ValueError: pass
-                if final_ts:
-                    dt_obj = datetime.fromtimestamp(final_ts / 1000, tz=timezone.utc)
-                    default_date = dt_obj.date()
-                    default_time = dt_obj.time()
+            for display_name, m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in sorted_pairs_myriad:
+                st.markdown(f"**{display_name}**")
                 
-                c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 1, 1, 2])
-                new_threshold = c1.number_input("Profit Alert ($)", value=float(profit_threshold), min_value=0.0, step=1.0)
-                end_date_input = c2.date_input("End Date (UTC)", value=default_date, help="Override end date for APY. Clear to use API default.")
-                end_time_input = c3.time_input("End Time (UTC)", value=default_time, help="Override end time for APY.")
-                is_flipped_new = c4.checkbox("Flipped", value=bool(is_flipped))
-                is_autotrade_safe_new = c5.checkbox("🤖 Auto", value=bool(is_autotrade_safe), help="Enable automated trading for this pair.")
+                m_url = f"https://app.myriad.social/markets/{m_slug}"
+                p_url = f"https://polymarket.com/event/{p_id}"
+                
+                c1_disp_m, c2_disp_m = st.columns([12,1])
+                with c1_disp_m:
+                    st.markdown(f"• [Myriad Link]({m_url}) ↔ [Polymarket Link]({p_url})")
+                with c2_disp_m:
+                    if st.button("❌", key=f"del_pair_myriad_{m_slug}_{p_id}", help="Delete this pair"):
+                        delete_manual_pair_myriad(m_slug, p_id)
+                        st.rerun()
 
-                if c6.form_submit_button("Update Pair"):
-                    new_override_ts = None
-                    if end_date_input and end_time_input:
-                        combined_dt = datetime.combine(end_date_input, end_time_input, tzinfo=timezone.utc)
-                        new_override_ts = int(combined_dt.timestamp() * 1000)
-                    save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts, int(is_autotrade_safe_new))
-                    st.success(f"Pair {m_slug}/{p_id} updated."); time.sleep(1); st.rerun()
+                with st.form(key=f"form_pair_myriad_{m_slug}_{p_id}"):
+                    default_date, default_time = None, None
+                    api_date_str = myriad_map.get(m_slug, {}).get('expires_at')
+                    final_ts = end_date_override
+                    if not final_ts and api_date_str:
+                        try:
+                            dt_obj = datetime.fromisoformat(api_date_str.replace('Z', '+00:00'))
+                            final_ts = int(dt_obj.timestamp() * 1000)
+                        except ValueError: pass
+                    if final_ts:
+                        dt_obj = datetime.fromtimestamp(final_ts / 1000, tz=timezone.utc)
+                        default_date = dt_obj.date()
+                        default_time = dt_obj.time()
+                    
+                    c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 1, 1, 2])
+                    new_threshold = c1.number_input("Profit Alert ($)", value=float(profit_threshold), min_value=0.0, step=1.0, key=f"threshold_myriad_{m_slug}_{p_id}")
+                    end_date_input = c2.date_input("End Date (UTC)", value=default_date, help="Override end date for APY. Clear to use API default.", key=f"date_myriad_{m_slug}_{p_id}")
+                    end_time_input = c3.time_input("End Time (UTC)", value=default_time, help="Override end time for APY.", key=f"time_myriad_{m_slug}_{p_id}")
+                    is_flipped_new = c4.checkbox("Flipped", value=bool(is_flipped), key=f"flipped_myriad_{m_slug}_{p_id}")
+                    is_autotrade_safe_new = c5.checkbox("🤖 Auto", value=bool(is_autotrade_safe), help="Enable automated trading for this pair.", key=f"autotrade_myriad_{m_slug}_{p_id}")
+
+                    if c6.form_submit_button("Update Pair"):
+                        new_override_ts = None
+                        if end_date_input and end_time_input:
+                            combined_dt = datetime.combine(end_date_input, end_time_input, tzinfo=timezone.utc)
+                            new_override_ts = int(combined_dt.timestamp() * 1000)
+                        save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts, int(is_autotrade_safe_new))
+                        st.success(f"Pair {m_slug}/{p_id} updated."); time.sleep(1); st.rerun()
+                st.markdown("---")
+
 
     st.subheader("🆕 Pending New Myriad Markets")
     pending_myriad = load_new_myriad_markets()
