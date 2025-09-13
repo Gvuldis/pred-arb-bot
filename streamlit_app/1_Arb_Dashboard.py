@@ -22,7 +22,8 @@ from streamlit_app.db import (
     load_probability_watches, delete_probability_watch, set_config_value, get_config_value,
     save_myriad_markets, load_myriad_markets, load_new_myriad_markets,
     add_new_myriad_market, ignore_myriad_market, remove_new_myriad_market,
-    save_manual_pair_myriad, load_manual_pairs_myriad, delete_manual_pair_myriad
+    save_manual_pair_myriad, load_manual_pairs_myriad, delete_manual_pair_myriad,
+    clear_arb_opportunities
 )
 # Matching logic
 from matching.fuzzy import fetch_all_polymarket_clob_markets, fetch_bodega_v3_active_markets
@@ -422,6 +423,16 @@ with tab_other:
             save_myriad_markets(m_client.fetch_markets())
             save_polymarkets(fetch_all_polymarket_clob_markets())
             st.success("Market data refreshed.")
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("🚨 Admin Actions")
+    st.warning("These actions are destructive. Use with caution.")
+    if st.button("Clear Pending Autotrade Queue"):
+        with st.spinner("Clearing autotrade queue..."):
+            cleared_count = clear_arb_opportunities()
+            st.success(f"Successfully cleared {cleared_count} pending opportunities from the autotrade queue.")
+            time.sleep(2)
             st.rerun()
 
 st.markdown("---")

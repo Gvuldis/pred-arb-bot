@@ -332,6 +332,28 @@ def pop_arb_opportunity() -> Optional[Dict]:
             log.error(f"Error popping opportunity from queue: {e}", exc_info=True)
             return None
 
+def clear_arb_opportunities() -> int:
+    """Deletes all entries from the arb_opportunities table and returns the count of deleted rows."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            # First, count the rows to be deleted
+            count_row = cur.execute("SELECT COUNT(*) FROM arb_opportunities").fetchone()
+            count = count_row[0] if count_row else 0
+            
+            if count > 0:
+                # Then, delete all rows
+                cur.execute("DELETE FROM arb_opportunities")
+                log.warning(f"Cleared {count} pending arbitrage opportunities from the queue.")
+            
+            conn.commit()
+            return count
+        except Exception as e:
+            conn.rollback()
+            log.error(f"Error clearing opportunity queue: {e}", exc_info=True)
+            return 0
+
 def log_trade_attempt(trade_log: Dict):
     """Inserts or replaces a record in the automated_trades_log."""
     with get_conn() as conn:
