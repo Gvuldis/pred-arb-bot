@@ -124,7 +124,7 @@ def run_bodega_arb_check():
                     
                     if summary.get("profit_usd", 0) > profit_threshold and \
                        summary.get("roi", 0) > 0.05 and \
-                       summary.get("apy", 0) >= 1:
+                       summary.get("apy", 0) >= 0.5:
                         summary['polymarket_side'] = poly_outcome_name_yes if summary['polymarket_side'] == 'YES' else poly_outcome_name_no
                         pair_desc = f"{pool['name']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, b_id, p_id))
