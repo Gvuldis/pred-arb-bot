@@ -29,7 +29,7 @@ load_dotenv()
 # --- Trader Configuration ---
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "DRY_RUN")
 LIMITED_LIVE_CAP_USD = float(os.getenv("LIMITED_LIVE_CAP_USD", "10.0"))
-MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "50.00"))
+MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "5.00"))
 MIN_ROI = float(os.getenv("MIN_ROI", "0.05"))
 MIN_APY = float(os.getenv("MIN_APY", "5"))
 
