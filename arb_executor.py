@@ -472,4 +472,46 @@ def process_opportunity(opp: dict):
         log.info(f"Set market cooldown for '{market_key}' due to pre-flight failure.")
 
         status = 'FAIL_PREFLIGHT'
-        if 'Leg 1'
+        if 'Leg 1' in str(e): status = 'FAIL_LEG1_EXECUTION'
+        if 'Leg 2' in str(e): status = 'FAIL_LEG2_EXECUTION'
+        trade_log.update({'status': status, 'status_message': str(e)})
+        db.log_trade_attempt(trade_log)
+        if notifier: notifier.notify_autotrade_failure(market_title, str(e), status)
+        if status == 'FAIL_LEG2_EXECUTION' and trade_log.get('executed_poly_shares', 0) > 0:
+            log.critical(f"!!!!!! PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
+            if notifier: notifier.notify_autotrade_panic(market_title, str(e))
+            if EXECUTION_MODE != "DRY_RUN":
+                log.info("Attempting to unwind Polymarket position...")
+                unwind_result = unwind_polymarket_position(opp['market_identifiers']['polymarket_token_id_buy'], trade_log['executed_poly_shares'])
+            else:
+                log.warning("[DRY RUN] Simulating panic unwind.")
+                unwind_result = {'success': True}
+            
+            log_status = 'SUCCESS_RECONCILED' if unwind_result.get('success') else 'FAIL_RECONCILED'
+            log.info(f"Panic unwind status: {log_status}")
+            trade_log.update({'status': log_status})
+            db.log_trade_attempt(trade_log)
+    except Exception as e:
+        log.critical(f"An unexpected error occurred processing {trade_id}: {e}", exc_info=True)
+        trade_log.update({'status': 'FAIL_UNEXPECTED', 'status_message': str(e)})
+        db.log_trade_attempt(trade_log)
+
+# ==============================================================================
+# 4. MAIN SERVICE LOOP
+# ==============================================================================
+def main_loop():
+    log.info(f"--- Unified Arb Executor started in {EXECUTION_MODE} mode ---")
+    while True:
+        try:
+            opportunity = db.pop_arb_opportunity()
+            if opportunity:
+                process_opportunity(opportunity)
+            else:
+               time.sleep(5)
+        except Exception as e:
+            log.error(f"Error in main loop: {e}", exc_info=True)
+            time.sleep(30)
+
+if __name__ == "__main__":
+    db.init_db()
+    main_loop()
