@@ -12,17 +12,16 @@ class MyriadClient:
     def fetch_markets(self) -> List[Dict]:
         """Fetch all active Myriad markets."""
         log.info("Fetching fresh Myriad markets from API.")
-        # This specific endpoint is for a particular "land" on Myriad, which is what we want.
         url = f"{self.api_url}/markets?network_id=274133&state=open&land_ids=myriad-szn2-usdc-v33"
         try:
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
             markets = resp.json()
-            # We only care about binary (2-outcome) markets for now
             return [m for m in markets if len(m.get("outcomes", [])) == 2]
         except requests.RequestException as e:
+            # Re-raise the exception to be handled by the caller
             log.error(f"Failed to fetch Myriad markets: {e}")
-            return []
+            raise
 
     def fetch_market_details(self, market_slug: str) -> Optional[Dict]:
         """Retrieve a single Myriad market by its slug."""
