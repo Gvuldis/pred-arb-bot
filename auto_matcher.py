@@ -205,8 +205,8 @@ def run_myriad_arb_check():
                         summary['polymarket_side'] = 2 if current_poly_side == 1 else 1
 
                     if summary.get("profit_usd", 0) > profit_threshold and \
-                       summary.get("roi", 0) > 0.025 and \
-                       summary.get("apy", 0) >= 0.50:
+                       summary.get("roi", 0) > 0.05 and \
+                       summary.get("apy", 0) >= 5:
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
                         pair_desc = f"{m_data['title']} <-> {p_data['question']}"
