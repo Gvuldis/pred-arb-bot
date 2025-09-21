@@ -1,3 +1,4 @@
+# services/myriad/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -43,6 +44,46 @@ def lmsr_cost(q1: float, q2: float, b: float) -> float:
     """LMSR cost function."""
     if b <= 0: raise ValueError("B parameter must be positive.")
     return b * logsumexp([q1/b, q2/b])
+
+def solve_shares_for_cost(
+    q1_initial: float, q2_initial: float, b: float,
+    max_cost: float, fee_rate: float,
+    iterations: int = 30 # A binary search is very efficient
+) -> float:
+    """
+    Calculates the maximum number of shares that can be bought for a given maximum cost.
+    Uses a binary search algorithm to find the number of shares.
+    """
+    initial_pool_cost = lmsr_cost(q1_initial, q2_initial, b)
+    
+    # Define a helper function to calculate the total cost for a given number of shares
+    def get_cost(shares_to_buy: float) -> float:
+        if shares_to_buy <= 0:
+            return 0.0
+        cost_pre_fee = lmsr_cost(q1_initial + shares_to_buy, q2_initial, b) - initial_pool_cost
+        return cost_pre_fee * (1 + fee_rate)
+
+    # The price gives a hint for the search space. Max possible shares is very large.
+    p1_start, _ = compute_price(q1_initial, q2_initial, b)
+    avg_price_guess = (p1_start + 1.0) / 2.0
+    high_guess = (max_cost / avg_price_guess) * 2 if avg_price_guess > 0 else max_cost * 4
+
+    low_shares = 0.0
+    high_shares = high_guess
+    best_guess = 0.0
+
+    # Binary search for the number of shares
+    for _ in range(iterations):
+        mid_shares = (low_shares + high_shares) / 2
+        cost_at_mid = get_cost(mid_shares)
+
+        if cost_at_mid <= max_cost:
+            best_guess = mid_shares  # This is a valid number of shares
+            low_shares = mid_shares
+        else:
+            high_shares = mid_shares
+            
+    return best_guess
 
 def solve_x_for_price(q1: float, q2: float, p_tgt: float, b: float) -> Optional[float]:
     """Solve for x such that compute_price(q1 + x, q2, b) == p_tgt."""

@@ -1,3 +1,4 @@
+# streamlit_app/db.py
 import sqlite3
 from pathlib import Path
 import time
@@ -107,6 +108,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS app_config (
           key    TEXT PRIMARY KEY,
           value  TEXT NOT NULL
+        )""")
+        # NEW TABLE FOR POLYMARKET TRADE LOGS
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS polymarket_trades_log (
+            trade_id TEXT PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            market_id TEXT NOT NULL,
+            matched_amount REAL NOT NULL,
+            match_time INTEGER NOT NULL,
+            full_response_json TEXT NOT NULL
         )""")
 
         # --- NEW TABLES FOR ARB-EXECUTOR ---
@@ -241,6 +252,42 @@ def load_polymarkets() -> list:
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM polymarket_markets").fetchall()
         return [{"condition_id": r["condition_id"], "question": r["question"], "fetched_at": r["fetched_at"]} for r in rows]
+
+def save_poly_trades(trades: list):
+    """Saves a list of Polymarket trades to the database, ignoring duplicates."""
+    with get_conn() as conn:
+        to_insert = []
+        for trade in trades:
+            trade_id = trade.get('id')
+            if not trade_id:
+                continue
+
+            matched_amount = 0.0
+            maker_orders = trade.get('maker_orders', [])
+            for maker_order in maker_orders:
+                try:
+                    matched_amount += float(maker_order.get('matched_amount', '0'))
+                except (ValueError, TypeError):
+                    log.warning(f"Could not parse matched_amount in trade {trade_id}: {maker_order.get('matched_amount')}")
+
+            record = (
+                trade_id,
+                trade.get('taker_order_id'),
+                trade.get('market'),
+                matched_amount,
+                trade.get('match_time'),
+                json.dumps(trade)
+            )
+            to_insert.append(record)
+        
+        if to_insert:
+            conn.executemany("""
+                INSERT OR IGNORE INTO polymarket_trades_log 
+                (trade_id, order_id, market_id, matched_amount, match_time, full_response_json) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, to_insert)
+            conn.commit()
+            log.info(f"Saved/updated {len(to_insert)} Polymarket trades in the log.")
 
 # --- Pairing Functions ---
 def save_manual_pair(bodega_id: str, poly_id: str, is_flipped: int, profit_threshold_usd: float, end_date_override: int = None):

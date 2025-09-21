@@ -1,3 +1,4 @@
+# arb_executor.py
 import os
 import math
 import logging
@@ -34,9 +35,9 @@ MIN_APY = float(os.getenv("MIN_APY", "0.5"))
 
 # --- Safety Parameters ---
 MIN_ETH_BALANCE = 0.0003
-MARKET_EXPIRY_BUFFER_MINUTES = 180
+MARKET_EXPIRY_BUFFER_MINUTES = 10
 TRADE_COOLDOWN_MINUTES = 1
-# LEG1_TIMEOUT_SECONDS = 60 # No longer needed with FAK orders
+CAPITAL_SAFETY_BUFFER_USD = 10.0 # New safety buffer
 
 # --- On-Chain Configuration ---
 ABSTRACT_RPC_URL = os.getenv("ABSTRACT_RPC_URL")
@@ -156,40 +157,30 @@ def execute_polymarket_buy(token_id: str, price: float, size: float) -> dict:
     px, sz, usd = normalize_buy_args(price, size)
     if sz <= 0 or px <= 0:
         log.warning(f"[POLY] Normalized to zero. price={price}, size={size} -> px={px}, sz={sz}")
-        return {'success': True, 'executed_shares': 0, 'tx_hash': 'SKIPPED_ZERO_SIZE'}
+        # Return a success=True response that looks like a non-filled order, to avoid erroring out.
+        return {'success': True, 'response': {'status': 'skipped_zero_size', 'success': True, 'takingAmount': '0'}}
 
     log.info(f"[POLY] Executing BUY FAK. Token: {token_id} | "
          f"price={px:.2f}, size={sz:.4f}, dollars={usd:.2f}")
 
     try:
         order_args = OrderArgs(price=px, size=sz, side=BUY, token_id=token_id)
-
         signed_order = clob_client.create_order(order_args)
         
         # Use Fill-And-Kill (FAK), which executes immediately against the book or is cancelled.
         resp = clob_client.post_order(signed_order, OrderType.FAK)
         log.info(f"[POLY] FAK Order response: {resp}")
 
-        # The response from a FAK order includes the amount filled.
-        # --- FIX 2: Corrected key from 'taking_amount' to 'takingAmount' to match API response. ---
-        executed_shares = float(resp.get('takingAmount', 0.0))
-        
-        if executed_shares > 0:
-            log.info(f"[POLY] FAK order successfully filled for {executed_shares} shares.")
-        else:
-            log.warning("[POLY] FAK order was not filled (or was filled for 0 shares).")
-
-        return {'success': True, 'executed_shares': executed_shares, 'tx_hash': str(resp)}
+        return {'success': resp.get('success', False), 'response': resp}
 
     except Exception as e:
         log.error(f"[POLY] FAK Order execution failed: {e}", exc_info=True)
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': str(e), 'response': {}}
 
 def unwind_polymarket_position(token_id: str, size: float) -> dict:
     """Attempts to unwind a position by placing an aggressive FAK sell order."""
     log.warning(f"[PANIC][POLY] Attempting to unwind by SELLING {size:.2f} of token {token_id} at price 0.01")
     
-    # --- FIX: Format size to 2 decimal places to ensure the unwind order is valid. ---
     final_size = float(f"{size:.2f}")
     if final_size <= 0:
         log.error(f"[PANIC][POLY] Unwind failed: size {size} became zero after formatting.")
@@ -288,6 +279,7 @@ def process_opportunity(opp: dict):
     log.info(f"Full opportunity details: {json.dumps(opp, indent=2)}")
     
     trade_log = {'trade_id': trade_id, 'attempt_timestamp_utc': datetime.now(timezone.utc).isoformat(), 'myriad_slug': myriad_slug, 'polymarket_condition_id': poly_id, 'log_details': opp}
+    market_key = f"myriad_{myriad_slug}"
 
     try:
         # STEP 1: PRE-FLIGHT CHECKS
@@ -314,7 +306,6 @@ def process_opportunity(opp: dict):
         if now_utc > buffer_time: raise ValueError(f"Market expires within {MARKET_EXPIRY_BUFFER_MINUTES} mins. Current time: {now_utc}, Expiry buffer: {buffer_time}")
         log.info(f"✅ Market expiry check passed. Now: {now_utc.isoformat()}, Buffer time: {buffer_time.isoformat()}")
         
-        market_key = f"myriad_{myriad_slug}"
         last_trade_ts = db.get_market_cooldown(market_key)
         if last_trade_ts:
             last_trade_dt = datetime.fromisoformat(last_trade_ts)
@@ -342,13 +333,54 @@ def process_opportunity(opp: dict):
         q1_f, q2_f = (amm['myriad_q1'] + trade_plan['myriad_shares_to_buy'], amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + trade_plan['myriad_shares_to_buy'])
         trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f, q2_f, amm['myriad_inferred_b']) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
         opp['trade_plan'] = trade_plan
-        log.info(f"Final Trade Plan: Buy {trade_plan['polymarket_shares_to_buy']:.2f} on Poly for ~${trade_plan['estimated_polymarket_cost_usd']:.4f}. Buy {trade_plan['myriad_shares_to_buy']:.2f} on Myriad for ~${trade_plan['estimated_myriad_cost_usd']:.4f}")
+        log.info(f"Initial Full Trade Plan: Buy {trade_plan['polymarket_shares_to_buy']:.2f} on Poly for ~${trade_plan['estimated_polymarket_cost_usd']:.4f}. Buy {trade_plan['myriad_shares_to_buy']:.2f} on Myriad for ~${trade_plan['estimated_myriad_cost_usd']:.4f}")
             
+        # --- MODIFIED LOGIC: Capital Constrained Trade Calculation ---
+        myriad_usdc_balance = get_abstract_usdc_balance()
         poly_usdc_balance = get_polygon_usdc_balance()
+
+        is_myriad_insufficient = myriad_usdc_balance < trade_plan['estimated_myriad_cost_usd']
+        is_poly_insufficient = poly_usdc_balance < trade_plan['estimated_polymarket_cost_usd']
+
+        if is_myriad_insufficient or is_poly_insufficient:
+            log.warning("Insufficient capital for full trade. Attempting to calculate a smaller, capital-constrained trade...")
+            
+            available_myriad_capital = max(0, myriad_usdc_balance - CAPITAL_SAFETY_BUFFER_USD)
+            available_poly_capital = max(0, poly_usdc_balance - CAPITAL_SAFETY_BUFFER_USD)
+
+            q1_initial_myr, q2_initial_myr = (amm['myriad_q1'], amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q2'], amm['myriad_q1'])
+            max_shares_from_myriad = myriad_model.solve_shares_for_cost(
+                q1_initial=q1_initial_myr, q2_initial=q2_initial_myr, b=amm['myriad_inferred_b'],
+                max_cost=available_myriad_capital, fee_rate=FEE_RATE_MYRIAD_BUY
+            )
+
+            poly_price = trade_plan['polymarket_limit_price']
+            max_shares_from_poly = (available_poly_capital / poly_price) if poly_price > 0 else 0
+
+            resized_shares = math.floor(min(max_shares_from_myriad, max_shares_from_poly))
+            log.info(f"Capital limits: Myriad allows for ~{max_shares_from_myriad:.2f} shares, Poly allows for ~{max_shares_from_poly:.2f} shares. Taking {resized_shares}.")
+
+            if resized_shares < 1:
+                raise ValueError(f"Capital-constrained calculation resulted in < 1 share. Aborting.")
+
+            trade_plan['myriad_shares_to_buy'] = resized_shares
+            trade_plan['polymarket_shares_to_buy'] = resized_shares
+            
+            trade_plan['estimated_polymarket_cost_usd'] = resized_shares * poly_price
+            q1_f_resized, q2_f_resized = (amm['myriad_q1'] + resized_shares, amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + resized_shares)
+            trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_resized, q2_f_resized, amm['myriad_inferred_b']) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
+            
+            payout = resized_shares
+            total_cost = trade_plan['estimated_myriad_cost_usd'] + trade_plan['estimated_polymarket_cost_usd']
+            profit = payout - total_cost
+            if profit < MIN_PROFIT_USD:
+                 raise ValueError(f"Resized trade profit of ${profit:.2f} is below minimum of ${MIN_PROFIT_USD}.")
+            
+            log.info(f"REVISED Final Trade Plan: Buy {resized_shares} on Poly for ~${trade_plan['estimated_polymarket_cost_usd']:.4f}. Buy {resized_shares} on Myriad for ~${trade_plan['estimated_myriad_cost_usd']:.4f}")
+            opp['trade_plan'] = trade_plan
+        
         if poly_usdc_balance < trade_plan['estimated_polymarket_cost_usd']: raise ValueError(f"Insufficient USDC on Polygon. Have: ${poly_usdc_balance:.2f}, Need: ${trade_plan['estimated_polymarket_cost_usd']:.2f}")
         log.info(f"✅ Polygon USDC balance sufficient.")
-        
-        myriad_usdc_balance = get_abstract_usdc_balance()
         if myriad_usdc_balance < trade_plan['estimated_myriad_cost_usd']: raise ValueError(f"Insufficient USDC on Myriad. Have: ${myriad_usdc_balance:.2f}, Need: ${trade_plan['estimated_myriad_cost_usd']:.2f}")
         log.info(f"✅ Myriad USDC balance sufficient.")
 
@@ -358,26 +390,65 @@ def process_opportunity(opp: dict):
         # STEP 2: LEG 1 EXECUTION (POLYMARKET)
         log.info("--- Executing Leg 1 (Polymarket) ---")
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        
+        existing_trade_ids = set()
+        if EXECUTION_MODE != "DRY_RUN":
+            log.info("[POLY] Syncing trades before execution...")
+            all_my_trades = clob_client.get_trades()
+            db.save_poly_trades(all_my_trades)
+            existing_trade_ids = {t['id'] for t in all_my_trades}
+            log.info(f"[POLY] Synced {len(all_my_trades)} trades. Found {len(existing_trade_ids)} existing trade IDs.")
+
         if EXECUTION_MODE == "DRY_RUN":
             log.warning("[DRY RUN] Simulating Polymarket BUY.")
-            poly_result = {'success': True, 'executed_shares': trade_plan['polymarket_shares_to_buy']}
+            simulated_resp = {'success': True, 'takingAmount': str(trade_plan['polymarket_shares_to_buy']), 'status': 'filled'}
+            poly_result = {'success': True, 'response': simulated_resp}
         else:
             poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], trade_plan['polymarket_limit_price'], trade_plan['polymarket_shares_to_buy'])
         
-        if not poly_result.get('success'): raise RuntimeError(f"Failed Leg 1 (Poly): {poly_result.get('error')}")
-        executed_poly_shares = poly_result.get('executed_shares', 0.0)
+        if not poly_result.get('success'):
+            error_msg = poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')
+            raise RuntimeError(f"Failed Leg 1 (Poly): {error_msg}")
+        
+        fak_response = poly_result.get('response', {})
+        executed_poly_shares = 0.0
+
+        if fak_response.get('status') == 'delayed' and EXECUTION_MODE != "DRY_RUN":
+            order_id = fak_response.get('orderID')
+            log.warning(f"[POLY-DELAY] Order {order_id} is delayed. Waiting 5 seconds for trade to appear...")
+            time.sleep(5)
+            log.info("[POLY-DELAY] Re-fetching trades to find the delayed order outcome...")
+            all_my_trades_after = clob_client.get_trades()
+            db.save_poly_trades(all_my_trades_after)
+            new_trade = next((t for t in all_my_trades_after if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id), None)
+            
+            if new_trade:
+                log.info(f"[POLY-DELAY] Found new trade corresponding to delayed order: {new_trade['id']}")
+                matched_amount = sum(float(mo.get('matched_amount', '0')) for mo in new_trade.get('maker_orders', []))
+                log.info(f"[POLY-DELAY] Total matched amount from new trade: {matched_amount}")
+                executed_poly_shares = matched_amount
+            else:
+                log.error(f"[POLY-DELAY] CRITICAL: Waited for delayed order {order_id} but could not find corresponding trade. Assuming 0 shares filled.")
+        else:
+            taking_amount_raw = fak_response.get('takingAmount')
+            try:
+                if taking_amount_raw: executed_poly_shares = float(taking_amount_raw)
+            except (ValueError, TypeError):
+                log.warning(f"[POLY] Could not convert takingAmount ('{taking_amount_raw}') to float. Treating as 0.")
+            if executed_poly_shares > 0: log.info(f"[POLY] FAK order successfully filled for {executed_poly_shares} shares.")
+            else: log.warning(f"[POLY] FAK order not filled. Status: {fak_response.get('status')}")
+
         if executed_poly_shares <= 0: raise RuntimeError("Leg 1 (Poly) executed but no shares acquired.")
         log.info(f"✅ Leg 1 SUCCESS: Acquired {executed_poly_shares} shares on Polymarket.")
-        trade_log.update({'executed_poly_shares': executed_poly_shares, 'poly_tx_hash': poly_result.get('tx_hash')})
+        trade_log.update({'executed_poly_shares': executed_poly_shares, 'poly_tx_hash': str(fak_response)})
 
         # STEP 3: LEG 2 EXECUTION (MYRIAD)
         log.info("--- Executing Leg 2 (Myriad) ---")
-        # Recalculate Myriad cost based on actual shares filled on Polymarket
         q1_f_final, q2_f_final = (amm['myriad_q1'] + executed_poly_shares, amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + executed_poly_shares)
         final_myriad_cost = (myriad_model.lmsr_cost(q1_f_final, q2_f_final, amm['myriad_inferred_b']) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
         log.info(f"Recalculated Myriad cost for {executed_poly_shares} shares: ${final_myriad_cost:.4f}")
 
-        myriad_usdc_balance = get_abstract_usdc_balance() # Re-check balance just in case
+        myriad_usdc_balance = get_abstract_usdc_balance()
         if myriad_usdc_balance < final_myriad_cost: raise RuntimeError(f"Insufficient capital for Leg 2. Have: ${myriad_usdc_balance:.2f}, Need: ${final_myriad_cost:.2f}")
         log.info(f"✅ Myriad USDC balance sufficient for final cost.")
         
@@ -397,47 +468,8 @@ def process_opportunity(opp: dict):
 
     except (ValueError, RuntimeError) as e:
         log.error(f"Trade failed for {trade_id}: {e}")
+        db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        log.info(f"Set market cooldown for '{market_key}' due to pre-flight failure.")
+
         status = 'FAIL_PREFLIGHT'
-        if 'Leg 1' in str(e): status = 'FAIL_LEG1_EXECUTION'
-        if 'Leg 2' in str(e): status = 'FAIL_LEG2_EXECUTION'
-        trade_log.update({'status': status, 'status_message': str(e)})
-        db.log_trade_attempt(trade_log)
-        if notifier: notifier.notify_autotrade_failure(market_title, str(e), status)
-        if status == 'FAIL_LEG2_EXECUTION' and trade_log.get('executed_poly_shares', 0) > 0:
-            log.critical(f"!!!!!! PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
-            if notifier: notifier.notify_autotrade_panic(market_title, str(e))
-            if EXECUTION_MODE != "DRY_RUN":
-                log.info("Attempting to unwind Polymarket position...")
-                unwind_result = unwind_polymarket_position(opp['market_identifiers']['polymarket_token_id_buy'], trade_log['executed_poly_shares'])
-            else:
-                log.warning("[DRY RUN] Simulating panic unwind.")
-                unwind_result = {'success': True}
-            
-            log_status = 'SUCCESS_RECONCILED' if unwind_result.get('success') else 'FAIL_RECONCILED'
-            log.info(f"Panic unwind status: {log_status}")
-            trade_log.update({'status': log_status})
-            db.log_trade_attempt(trade_log)
-    except Exception as e:
-        log.critical(f"An unexpected error occurred processing {trade_id}: {e}", exc_info=True)
-        trade_log.update({'status': 'FAIL_UNEXPECTED', 'status_message': str(e)})
-        db.log_trade_attempt(trade_log)
-
-# ==============================================================================
-# 4. MAIN SERVICE LOOP
-# ==============================================================================
-def main_loop():
-    log.info(f"--- Unified Arb Executor started in {EXECUTION_MODE} mode ---")
-    while True:
-        try:
-            opportunity = db.pop_arb_opportunity()
-            if opportunity:
-                process_opportunity(opportunity)
-            else:
-               time.sleep(5)
-        except Exception as e:
-            log.error(f"Error in main loop: {e}", exc_info=True)
-            time.sleep(30)
-
-if __name__ == "__main__":
-    db.init_db()
-    main_loop()
+        if 'Leg 1'
