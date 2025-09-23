@@ -2,3 +2,6 @@ __pycache__/
 .env
 market_data.db
 .streamlit/
+secrets.toml
+.streamlit/secrets.toml
+
