@@ -1,4 +1,3 @@
-# services/myriad/client.py
 import requests
 import logging
 from typing import List, Dict, Optional
@@ -37,8 +36,8 @@ class MyriadClient:
     def parse_realtime_prices(self, market_data: Dict) -> Optional[Dict]:
         """
         Parses market data to extract prices, shares, and titles for both outcomes.
-        It prioritizes the most recent price from the 'price_charts' for outcome 1,
-        and derives the price for outcome 0, ensuring data is as fresh and consistent as possible.
+        It prioritizes the most recent price from 'price_charts' for opportunity detection,
+        but also provides the lagging 'price' field for a stable B-parameter calculation.
         """
         if not market_data or len(market_data.get("outcomes", [])) != 2:
             return None
@@ -50,7 +49,7 @@ class MyriadClient:
 
             price1_realtime = None
 
-            # Step 1: Attempt to get the most recent price for outcome 1 (usually "No") from its price chart.
+            # Step 1: Get the most up-to-date price for outcome 1 (usually "No") from its price chart.
             price_charts = outcome1.get("price_charts")
             if price_charts and isinstance(price_charts, list) and len(price_charts) > 0:
                 prices_list = price_charts[0].get("prices")
@@ -60,27 +59,38 @@ class MyriadClient:
                         price1_realtime = float(last_price_point["value"])
                         log.info(f"Using real-time chart price for {market_data.get('slug')}: {price1_realtime}")
 
-            # Step 2: If the price chart method fails, fall back to the main 'price' field.
+            # Step 2: If the chart method fails, fall back to the main 'price' field from the outcome.
             if price1_realtime is None:
                 price1_fallback = outcome1.get("price")
                 if price1_fallback is not None:
                     price1_realtime = float(price1_fallback)
                     log.warning(f"Falling back to main price field for {market_data.get('slug')}: {price1_realtime}")
             
-            # Step 3: If we have a valid price for outcome 1, derive outcome 0's price. Otherwise, fail.
+            # Step 3: Validate the price for outcome 1 and derive outcome 0's price for arb checking.
             if price1_realtime is None or not (0 <= price1_realtime <= 1):
-                log.error(f"Could not determine a valid price for outcome 1 in market {market_data.get('slug')}")
+                log.error(f"Could not determine a valid real-time price for outcome 1 in market {market_data.get('slug')}")
                 return None
             
-            price0_derived = 1.0 - price1_realtime
+            price0_derived_realtime = 1.0 - price1_realtime
+
+            # Step 4: Get the lagging price from outcome 0, to be used for B-parameter calculation.
+            price0_lagging_for_b = outcome0.get("price")
 
             return {
-                "price1": price0_derived,
-                "shares1": outcome0.get("shares_held"),
-                "title1": outcome0.get("title"),
+                # Real-time prices for opportunity detection
+                "price1": price0_derived_realtime,
                 "price2": price1_realtime,
+                
+                # Share data (consistent with lagging price)
+                "shares1": outcome0.get("shares_held"),
                 "shares2": outcome1.get("shares_held"),
+
+                # Outcome titles
+                "title1": outcome0.get("title"),
                 "title2": outcome1.get("title"),
+
+                # Lagging price for stable B-parameter calculation
+                "price1_for_b": price0_lagging_for_b,
             }
         except (StopIteration, KeyError, IndexError, TypeError, ValueError) as e:
             log.error(f"Error parsing real-time prices for Myriad market {market_data.get('slug')}: {e}", exc_info=True)

@@ -93,7 +93,6 @@ class DiscordNotifier:
         poly_shares, poly_side = summary.get("polymarket_shares", 0), summary.get("polymarket_side_title", "?")
         cost_poly_usd = summary.get("cost_poly_usd", 0)
         
-        # On Myriad, shares resolve to $1
         payout_myriad_win_usd = myriad_shares
         payout_poly_win_usd = poly_shares
 
@@ -140,11 +139,30 @@ class DiscordNotifier:
         )
         self.send(content)
 
-    # --- NEW NOTIFICATIONS FOR ARB-EXECUTOR ---
-    def notify_autotrade_success(self, market_title: str, profit: float, shares: float):
-        content = f"✅ @everyone **AUTOMATED ARB EXECUTED**: {market_title}. **Profit**: ${profit:.2f}. **Shares**: {shares}"
+    # --- ARB-EXECUTOR NOTIFICATIONS ---
+    def notify_autotrade_success(self, market_title: str, profit: float, poly_shares: float, poly_cost: float, myriad_cost_est: float):
+        content = (
+            f"✅ @everyone **AUTOMATED ARB EXECUTED**\n\n"
+            f"**Market**: `{market_title}`\n"
+            f"**Est. Profit**: `${profit:.2f}`\n\n"
+            f"**Polymarket Leg:**\n"
+            f"- Bought `{poly_shares:.4f}` shares for `${poly_cost:.2f}`\n\n"
+            f"**Myriad Leg:**\n"
+            f"- Sent `${myriad_cost_est:.2f}` to buy shares.\n\n"
+            f"*Myriad trade details will be fetched from the API shortly...*"
+        )
         self.send(content)
-    
+
+    def notify_myriad_trade_details_found(self, market_title: str, trade_id: str, myriad_shares: float, myriad_cost: float):
+        content = (
+            f"ℹ️ **Myriad Trade Details Confirmed**\n\n"
+            f"**Market**: `{market_title}`\n"
+            f"**Trade ID**: `{trade_id}`\n"
+            f"**Myriad Leg Confirmed:**\n"
+            f"- Bought `{myriad_shares:.4f}` shares for `${myriad_cost:.2f}`"
+        )
+        self.send(content)
+
     def notify_autotrade_failure(self, market_title: str, reason: str, status: str):
         content = f"❌ **AUTOMATED ARB FAILED**: {market_title}.\n**Status**: `{status}`\n**Reason**: {reason}"
         self.send(content)
@@ -158,4 +176,11 @@ class DiscordNotifier:
 
     def notify_autotrade_dry_run(self, market_title: str, profit: float):
         content = f"DRY RUN: Would have executed arb on **{market_title}** for **${profit:.2f}** profit."
+        self.send(content)
+
+    def notify_critical_alert(self, title: str, message: str):
+        content = (
+            f"🚨 @everyone **CRITICAL ALERT: {title}** 🚨\n\n"
+            f"{message}"
+        )
         self.send(content)

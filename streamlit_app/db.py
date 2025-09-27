@@ -109,7 +109,6 @@ def init_db():
           key    TEXT PRIMARY KEY,
           value  TEXT NOT NULL
         )""")
-        # NEW TABLE FOR POLYMARKET TRADE LOGS
         cur.execute("""
         CREATE TABLE IF NOT EXISTS polymarket_trades_log (
             trade_id TEXT PRIMARY KEY,
@@ -132,11 +131,14 @@ def init_db():
             planned_poly_shares REAL,
             planned_myriad_shares REAL,
             executed_poly_shares REAL,
+            executed_poly_cost_usd REAL,
             executed_myriad_shares REAL,
+            executed_myriad_cost_usd REAL,
             poly_tx_hash TEXT,
             myriad_tx_hash TEXT,
             final_profit_usd REAL,
-            log_details TEXT
+            log_details TEXT,
+            myriad_api_lookup_status TEXT DEFAULT 'PENDING'
         )""")
         cur.execute("""
         CREATE TABLE IF NOT EXISTS market_cooldowns (
@@ -151,14 +153,12 @@ def init_db():
         )""")
 
         # --- Schema Migrations ---
-        # Add 'end_date_override' to manual_pairs
         cur.execute("PRAGMA table_info(manual_pairs)")
         columns = [row['name'] for row in cur.fetchall()]
         if 'end_date_override' not in columns:
             log.info("Migration: Adding 'end_date_override' to 'manual_pairs'.")
             cur.execute("ALTER TABLE manual_pairs ADD COLUMN end_date_override INTEGER")
 
-        # Add 'end_date_override' and 'is_autotrade_safe' to manual_pairs_myriad
         cur.execute("PRAGMA table_info(manual_pairs_myriad)")
         columns_myriad = [row['name'] for row in cur.fetchall()]
         if 'end_date_override' not in columns_myriad:
@@ -167,6 +167,18 @@ def init_db():
         if 'is_autotrade_safe' not in columns_myriad:
             log.info("Migration: Adding 'is_autotrade_safe' to 'manual_pairs_myriad'.")
             cur.execute("ALTER TABLE manual_pairs_myriad ADD COLUMN is_autotrade_safe INTEGER NOT NULL DEFAULT 0")
+        
+        cur.execute("PRAGMA table_info(automated_trades_log)")
+        columns_auto_trade = [row['name'] for row in cur.fetchall()]
+        if 'executed_poly_cost_usd' not in columns_auto_trade:
+            log.info("Migration: Adding 'executed_poly_cost_usd' to 'automated_trades_log'.")
+            cur.execute("ALTER TABLE automated_trades_log ADD COLUMN executed_poly_cost_usd REAL")
+        if 'executed_myriad_cost_usd' not in columns_auto_trade:
+            log.info("Migration: Adding 'executed_myriad_cost_usd' to 'automated_trades_log'.")
+            cur.execute("ALTER TABLE automated_trades_log ADD COLUMN executed_myriad_cost_usd REAL")
+        if 'myriad_api_lookup_status' not in columns_auto_trade:
+            log.info("Migration: Adding 'myriad_api_lookup_status' to 'automated_trades_log'.")
+            cur.execute("ALTER TABLE automated_trades_log ADD COLUMN myriad_api_lookup_status TEXT DEFAULT 'PENDING'")
 
         conn.commit()
         log.info("Database initialization/migration check complete.")
@@ -385,12 +397,10 @@ def clear_arb_opportunities() -> int:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         try:
-            # First, count the rows to be deleted
             count_row = cur.execute("SELECT COUNT(*) FROM arb_opportunities").fetchone()
             count = count_row[0] if count_row else 0
             
             if count > 0:
-                # Then, delete all rows
                 cur.execute("DELETE FROM arb_opportunities")
                 log.warning(f"Cleared {count} pending arbitrage opportunities from the queue.")
             
@@ -408,19 +418,51 @@ def log_trade_attempt(trade_log: Dict):
             INSERT OR REPLACE INTO automated_trades_log (
                 trade_id, attempt_timestamp_utc, myriad_slug, polymarket_condition_id,
                 status, status_message, planned_poly_shares, planned_myriad_shares,
-                executed_poly_shares, executed_myriad_shares, poly_tx_hash,
-                myriad_tx_hash, final_profit_usd, log_details
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                executed_poly_shares, executed_poly_cost_usd, executed_myriad_shares,
+                executed_myriad_cost_usd, poly_tx_hash, myriad_tx_hash, final_profit_usd,
+                log_details, myriad_api_lookup_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade_log.get('trade_id'), trade_log.get('attempt_timestamp_utc'),
             trade_log.get('myriad_slug'), trade_log.get('polymarket_condition_id'),
             trade_log.get('status'), trade_log.get('status_message'),
             trade_log.get('planned_poly_shares'), trade_log.get('planned_myriad_shares'),
-            trade_log.get('executed_poly_shares'), trade_log.get('executed_myriad_shares'),
+            trade_log.get('executed_poly_shares'), trade_log.get('executed_poly_cost_usd'),
+            trade_log.get('executed_myriad_shares'), trade_log.get('executed_myriad_cost_usd'),
             trade_log.get('poly_tx_hash'), trade_log.get('myriad_tx_hash'),
-            trade_log.get('final_profit_usd'), json.dumps(trade_log.get('log_details'))
+            trade_log.get('final_profit_usd'), json.dumps(trade_log.get('log_details')),
+            trade_log.get('myriad_api_lookup_status', 'PENDING')
         ))
         conn.commit()
+
+def update_trade_log_myriad_details(trade_id: str, details: dict):
+    """Updates a trade log with confirmed Myriad details after API lookup."""
+    with get_conn() as conn:
+        conn.execute("""
+            UPDATE automated_trades_log
+            SET executed_myriad_shares = ?,
+                executed_myriad_cost_usd = ?,
+                myriad_api_lookup_status = ?
+            WHERE trade_id = ?
+        """, (
+            details.get('executed_myriad_shares'),
+            details.get('executed_myriad_cost_usd'),
+            details.get('myriad_api_lookup_status'),
+            trade_id
+        ))
+        conn.commit()
+        log.info(f"Updated Myriad trade details in DB for trade {trade_id}.")
+
+def update_trade_log_myriad_status(trade_id: str, status: str):
+    """Updates just the Myriad API lookup status for a trade log."""
+    with get_conn() as conn:
+        conn.execute("""
+            UPDATE automated_trades_log
+            SET myriad_api_lookup_status = ?
+            WHERE trade_id = ?
+        """, (status, trade_id))
+        conn.commit()
+        log.warning(f"Updated Myriad lookup status to '{status}' for trade {trade_id}.")
 
 def get_market_cooldown(market_key: str) -> Optional[str]:
     """Gets the last trade attempt timestamp for a market."""
