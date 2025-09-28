@@ -1,4 +1,3 @@
-# services/myriad/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -115,7 +114,7 @@ def _calculate_trade_outcome_myriad(
 
     total_cost_usd = total_cost_myr_usd + cost_poly_usd
     
-    payout_usd = shares_to_buy_myr * 1 # 1% redemption fee
+    payout_usd = shares_to_buy_myr * 1 # Myriad has no redemption fee, payout is 1 USDC per share
     profit_usd = payout_usd - total_cost_usd
     roi = profit_usd / total_cost_usd if total_cost_usd > 0 else 0
     score = profit_usd if profit_usd < 0 else roi * profit_usd
@@ -157,7 +156,7 @@ def _calculate_trade_outcome_myriad_fixed_shares(
     
     total_cost_usd = total_cost_myr_usd + cost_poly_usd
     
-    payout_usd = shares_to_buy_myriad * 0.99 # 1% redemption fee
+    payout_usd = shares_to_buy_myriad * 1 # Myriad has no redemption fee, payout is 1 USDC per share
     profit_usd = payout_usd - total_cost_usd
     roi = profit_usd / total_cost_usd if total_cost_usd > 0 else 0
     score = profit_usd if profit_usd < 0 else roi * profit_usd
