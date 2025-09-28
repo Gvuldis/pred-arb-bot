@@ -524,7 +524,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     apy = summary.get('apy', 0)
                     threshold = opp['profit_threshold']
 
-                    if profit > threshold and roi > 0.05 and apy >= 0.50:
+                    if profit > threshold and roi > 0.05 and apy >= 2:
                         st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
                         st.markdown(f"**<p style='color:orange; font-size: 1.1em;'>SMALL PROFIT: {opp['description']}</p>**", unsafe_allow_html=True)
@@ -619,7 +619,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         opp['polymarket_side_title'] = p_name1 if opp['polymarket_side'] == 1 else p_name2
                         pair_desc = f"{m_data['title']} ↔ {p_data['question']}"
                         myriad_results.append({"description": pair_desc, "summary": opp, "m_slug": m_slug, "p_id": p_id, "profit_threshold": profit_threshold})
-                        if opp['profit_usd'] > profit_threshold and opp.get('roi', 0) > 0.025 and opp.get('apy', 0) >= 0.50:
+                        if opp['profit_usd'] > profit_threshold and opp.get('roi', 0) > 0.05 and opp.get('apy', 0) >= 5:
                             if notifier: notifier.notify_arb_opportunity_myriad(pair_desc, opp, m_slug, p_id)
                 except Exception as e:
                     st.error(f"Error checking Myriad pair ({m_slug}, {p_id}): {e}")
@@ -634,7 +634,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     profit, roi, apy = summary.get('profit_usd', 0), summary.get('roi', 0), summary.get('apy', 0)
                     threshold = opp['profit_threshold']
 
-                    if profit > threshold and roi > 0.025 and apy >= 0.50:
+                    if profit > threshold and roi > 0.05 and apy >= 5:
                         st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
                         st.markdown(f"**<p style='color:orange; font-size: 1.1em;'>SMALL PROFIT: {opp['description']}</p>**", unsafe_allow_html=True)
