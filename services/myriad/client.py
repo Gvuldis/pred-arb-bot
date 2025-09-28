@@ -1,3 +1,4 @@
+# services/myriad/client.py
 import requests
 import logging
 from typing import List, Dict, Optional
@@ -73,15 +74,12 @@ class MyriadClient:
             
             price0_derived_realtime = 1.0 - price1_realtime
 
-            # Step 4: Get the lagging price from outcome 0, to be used for B-parameter calculation.
-            price0_lagging_for_b = outcome0.get("price")
-
             return {
                 # Real-time prices for opportunity detection
                 "price1": price0_derived_realtime,
                 "price2": price1_realtime,
                 
-                # Share data (consistent with lagging price)
+                # Share data 
                 "shares1": outcome0.get("shares_held"),
                 "shares2": outcome1.get("shares_held"),
 
@@ -89,8 +87,8 @@ class MyriadClient:
                 "title1": outcome0.get("title"),
                 "title2": outcome1.get("title"),
 
-                # Lagging price for stable B-parameter calculation
-                "price1_for_b": price0_lagging_for_b,
+                # Static liquidity parameter
+                "liquidity": market_data.get("liquidity"),
             }
         except (StopIteration, KeyError, IndexError, TypeError, ValueError) as e:
             log.error(f"Error parsing real-time prices for Myriad market {market_data.get('slug')}: {e}", exc_info=True)

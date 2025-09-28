@@ -6,31 +6,6 @@ from typing import Optional, Tuple, Dict, Any, List
 
 log = logging.getLogger(__name__)
 
-def infer_b(q1: float, q2: float, price1: float) -> float:
-    """
-    Infers the B parameter (liquidity) of the Myriad LMSR market maker.
-    """
-    if not (0.0 < price1 < 1.0):
-        raise ValueError("price1 must be strictly between 0 and 1.")
-
-    if abs(price1 - 0.5) < 1e-9:
-        if abs(q1 - q2) > 1e-9:
-            raise ValueError("Price is ~0.5, but shares are not equal. B is indeterminate.")
-        else:
-            raise ValueError("Price is 0.5 and shares are equal, B is indeterminate.")
-            
-    price2 = 1.0 - price1
-    if price2 <= 0:
-        raise ValueError("Calculated price2 is invalid.")
-
-    diff = q1 - q2
-    log_ratio = math.log(price1 / price2)
-    
-    if abs(log_ratio) < 1e-9:
-         raise ValueError("Log ratio is too close to zero, B is indeterminate.")
-         
-    return diff / log_ratio
-
 def compute_price(q1: float, q2: float, b: float) -> Tuple[float, float]:
     """Stable LMSR instantaneous price calculation."""
     if b <= 0: return 0.5, 0.5
@@ -301,7 +276,7 @@ def build_arbitrage_table_myriad(
             )
         
         if final_outcome:
-            opp = {"direction": "BUY_1_MYRIAD", "myriad_side": 1, "polymarket_side": 2, "p_start": p_myr_1_start, "inferred_B": B}
+            opp = {"direction": "BUY_1_MYRIAD", "myriad_side": 1, "polymarket_side": 2, "p_start": p_myr_1_start, "B": B}
             opp.update(final_outcome)
             opp['analysis_details'] = analysis_details
             all_opportunities.append(opp)
@@ -340,7 +315,7 @@ def build_arbitrage_table_myriad(
             )
 
         if final_outcome:
-            opp = {"direction": "BUY_2_MYRIAD", "myriad_side": 2, "polymarket_side": 1, "p_start": p_myr_2_start, "inferred_B": B}
+            opp = {"direction": "BUY_2_MYRIAD", "myriad_side": 2, "polymarket_side": 1, "p_start": p_myr_2_start, "B": B}
             opp.update(final_outcome)
             opp['analysis_details'] = analysis_details
             all_opportunities.append(opp)

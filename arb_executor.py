@@ -1,3 +1,4 @@
+# arb_executor.py
 import os
 import math
 import logging
@@ -294,10 +295,11 @@ def process_opportunity(opp: dict):
             trade_plan['myriad_shares_to_buy'] *= scaling_factor
         
         amm = opp['amm_parameters']
-        initial_cost = myriad_model.lmsr_cost(amm['myriad_q1'], amm['myriad_q2'], amm['myriad_inferred_b'])
+        myriad_b = amm['myriad_liquidity']
+        initial_cost = myriad_model.lmsr_cost(amm['myriad_q1'], amm['myriad_q2'], myriad_b)
         trade_plan['estimated_polymarket_cost_usd'] = trade_plan['polymarket_shares_to_buy'] * trade_plan['polymarket_limit_price']
         q1_f_est, q2_f_est = (amm['myriad_q1'] + trade_plan['myriad_shares_to_buy'], amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + trade_plan['myriad_shares_to_buy'])
-        trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_est, q2_f_est, amm['myriad_inferred_b']) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
+        trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_est, q2_f_est, myriad_b) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
         opp['trade_plan'] = trade_plan
         log.info(f"Initial Full Trade Plan: Buy {trade_plan['polymarket_shares_to_buy']:.2f} Poly for ~${trade_plan['estimated_polymarket_cost_usd']:.4f}. Buy {trade_plan['myriad_shares_to_buy']:.2f} Myriad for ~${trade_plan['estimated_myriad_cost_usd']:.4f}")
             
@@ -308,14 +310,14 @@ def process_opportunity(opp: dict):
             available_myriad_capital = max(0, myriad_usdc_balance - CAPITAL_SAFETY_BUFFER_USD)
             available_poly_capital = max(0, poly_usdc_balance - CAPITAL_SAFETY_BUFFER_USD)
             q1_i_myr, q2_i_myr = (amm['myriad_q1'], amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q2'], amm['myriad_q1'])
-            max_shares_myriad = myriad_model.solve_shares_for_cost(q1_i_myr, q2_i_myr, amm['myriad_inferred_b'], available_myriad_capital, FEE_RATE_MYRIAD_BUY)
+            max_shares_myriad = myriad_model.solve_shares_for_cost(q1_i_myr, q2_i_myr, myriad_b, available_myriad_capital, FEE_RATE_MYRIAD_BUY)
             max_shares_poly = (available_poly_capital / trade_plan['polymarket_limit_price']) if trade_plan['polymarket_limit_price'] > 0 else 0
             resized_shares = math.floor(min(max_shares_myriad, max_shares_poly))
             if resized_shares < 1: raise ValueError(f"Capital-constrained calculation resulted in < 1 share.")
             trade_plan.update({'myriad_shares_to_buy': resized_shares, 'polymarket_shares_to_buy': resized_shares})
             trade_plan['estimated_polymarket_cost_usd'] = resized_shares * trade_plan['polymarket_limit_price']
             q1_f_res, q2_f_res = (amm['myriad_q1'] + resized_shares, amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + resized_shares)
-            trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_res, q2_f_res, amm['myriad_inferred_b']) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
+            trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_res, q2_f_res, myriad_b) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
             if (resized_shares - (trade_plan['estimated_myriad_cost_usd'] + trade_plan['estimated_polymarket_cost_usd'])) < MIN_PROFIT_USD:
                  raise ValueError(f"Resized trade profit is below minimum.")
             log.info(f"REVISED Plan: Buy {resized_shares} shares on both platforms.")
@@ -368,7 +370,7 @@ def process_opportunity(opp: dict):
         # STEP 3: LEG 2 EXECUTION (MYRIAD)
         log.info("--- Executing Leg 2 (Myriad) ---")
         q1_f_final, q2_f_final = (amm['myriad_q1'] + executed_poly_shares, amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + executed_poly_shares)
-        final_myriad_cost = (myriad_model.lmsr_cost(q1_f_final, q2_f_final, amm['myriad_inferred_b']) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
+        final_myriad_cost = (myriad_model.lmsr_cost(q1_f_final, q2_f_final, myriad_b) - initial_cost) * (1 + FEE_RATE_MYRIAD_BUY)
         if get_abstract_usdc_balance() < final_myriad_cost: raise RuntimeError(f"Insufficient capital for Leg 2.")
 
         if EXECUTION_MODE == "DRY_RUN":
@@ -424,3 +426,5 @@ def main_loop():
 if __name__ == "__main__":
     db.init_db()
     main_loop()
+
+

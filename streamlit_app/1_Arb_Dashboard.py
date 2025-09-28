@@ -12,7 +12,7 @@ from datetime import datetime, timezone, date, time as dt_time
 
 from config import b_client, m_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log
 from services.polymarket.model import build_arbitrage_table as build_bodega_arb_table, infer_b
-from services.myriad.model import build_arbitrage_table_myriad, infer_b as infer_b_myriad
+from services.myriad.model import build_arbitrage_table_myriad
 from track_record import portfolio_summary
 
 # Database helpers
@@ -178,7 +178,7 @@ with cal_myriad:
             calendar_data = []
             for market in all_myriads_for_calendar:
                 deadline_str, remaining_str, deadline_ts = format_deadline_iso(market.get('expires_at'))
-                calendar_data.append({ "deadline_ts": deadline_ts, "Market Name": market.get('name', 'N/A'), "End Date": deadline_str, "Time Remaining": remaining_str, "Slug": market.get('slug', 'N/A') })
+                calendar_data.append({ "deadline_ts": deadline_ts, "Market Name": market.get('title', 'N/A'), "End Date": deadline_str, "Time Remaining": remaining_str, "Slug": market.get('slug', 'N/A') })
             sorted_myriads = sorted(calendar_data, key=lambda x: x['deadline_ts'])
             for m in sorted_myriads: del m['deadline_ts']
             df_all = pd.DataFrame(sorted_myriads)
@@ -593,11 +593,13 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         st.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                         continue
                     
-                    if m_prices['price1'] is None or m_prices['shares1'] is None or m_prices.get('price1_for_b') is None: continue
+                    if m_prices.get('price1') is None or m_prices.get('shares1') is None: continue
 
                     Q1, Q2 = m_prices['shares1'], m_prices['shares2']
-                    P1_for_b = m_prices['price1_for_b']
-                    inferred_B_myriad = infer_b_myriad(Q1, Q2, P1_for_b)
+                    B_param = m_data.get('liquidity')
+                    if not B_param or B_param <=0:
+                        st.warning(f"Myriad market {m_slug} has invalid liquidity parameter ({B_param}). Skipping.")
+                        continue
 
                     obp1, obp2 = p_data.get('order_book_yes'), p_data.get('order_book_no')
                     p_name1, p_name2 = p_data.get('outcome_yes'), p_data.get('outcome_no')
@@ -607,7 +609,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
 
                     pair_opps = build_arbitrage_table_myriad(
                         Q1, Q2, obp1, obp2, 
-                        FEE_RATE_MYRIAD_BUY, inferred_B_myriad,
+                        FEE_RATE_MYRIAD_BUY, B_param,
                         P1_MYR_REALTIME=m_prices['price1']
                     )
 
@@ -644,7 +646,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     m_cols[1].metric("ROI", f"{roi*100:.2f}%")
                     m_cols[2].metric("APY", f"{apy*100:.2f}%")
                     m_cols[3].metric("Score (Profit*ROI)", f"{summary.get('score', 0):.4f}")
-                    m_cols[4].metric("Inferred B", f"{summary.get('inferred_B', 0):.2f}")
+                    m_cols[4].metric("Liquidity (B)", f"{summary.get('B', 0):.2f}")
                     t_cols = st.columns(2)
                     with t_cols[0]:
                         st.markdown("##### 1. Myriad Trade")

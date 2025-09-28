@@ -44,7 +44,7 @@ class MyriadMarketAnalyzer:
         self.price2: Optional[float] = None
         self.outcome_titles: Dict[int, str] = {}
         
-        # Inferred LMSR liquidity parameter
+        # LMSR liquidity parameter from API
         self.b_param: Optional[float] = None
 
     def fetch_and_parse(self) -> bool:
@@ -116,39 +116,24 @@ class MyriadMarketAnalyzer:
             log.error(f"Error while parsing outcomes: {e}")
             return False
             
-    def infer_b_parameter(self):
+    def load_b_parameter(self) -> bool:
         """
-        Infers the B parameter (liquidity) of the LMSR market maker.
-        Formula: b = (q1 - q2) / ln(price1 / price2)
+        Loads the B parameter (liquidity) directly from the market data.
+        The correct approach is to use the static 'liquidity' key provided by the API.
         """
-        if any(v is None for v in [self.price1, self.price2, self.q1, self.q2]):
-            log.error("Cannot infer B, market data not parsed correctly.")
-            return
-
-        if not (0.0 < self.price1 < 1.0):
-            log.warning(f"Cannot infer B: price1 ({self.price1}) must be strictly between 0 and 1.")
-            self.b_param = None
-            return
-
-        if abs(self.price1 - 0.5) < 1e-9:
-             if abs(self.q1 - self.q2) > 1e-9:
-                 log.warning("Price is ~0.5, but shares are not equal. B is indeterminate.")
-                 self.b_param = None
-                 return
-             else:
-                log.warning("Price is 0.5 and shares are equal. B is indeterminate. Cannot calculate.")
-                self.b_param = None
-                return
+        if not self.market_data:
+            log.error("Cannot load B parameter, market data not fetched.")
+            return False
         
-        try:
-            # The formula is derived from: price1 = exp(q1/b) / (exp(q1/b) + exp(q2/b))
-            diff = self.q1 - self.q2
-            log_ratio = math.log(self.price1 / self.price2)
-            self.b_param = diff / log_ratio
-            log.info(f"Successfully inferred B parameter: {self.b_param:.4f}")
-        except (ValueError, ZeroDivisionError) as e:
-            log.error(f"Could not calculate B parameter due to a math error: {e}")
+        liquidity = self.market_data.get('liquidity')
+        if liquidity is not None and liquidity > 0:
+            self.b_param = float(liquidity)
+            log.info(f"Successfully loaded B parameter from API 'liquidity' key: {self.b_param:.4f}")
+            return True
+        else:
+            log.error(f"Could not load B parameter. 'liquidity' key is missing, null, or zero in API response. Value: {liquidity}")
             self.b_param = None
+            return False
 
     @staticmethod
     def _lmsr_cost(q1: float, q2: float, b: float) -> float:
@@ -241,16 +226,14 @@ class MyriadMarketAnalyzer:
 # --- Main execution block for demonstration ---
 if __name__ == "__main__":
     # The example market slug from the prompt
-    market_slug_example = "will-donald-trump-visit-china-in-2025-fd342253-a881-4f70-b1f1-b4c1b2c4cbd2"
+    market_slug_example = "vikings-vs-steelers"
     
     print(f"Analyzing Myriad Market: {market_slug_example}")
     analyzer = MyriadMarketAnalyzer(market_slug=market_slug_example)
     
-    # Fetch, parse, and infer parameters
+    # Fetch, parse, and load parameters
     if analyzer.fetch_and_parse():
-        analyzer.infer_b_parameter()
-
-        if analyzer.b_param is not None:
+        if analyzer.load_b_parameter():
             # Sanity check: verify that our price calculation matches the API's price
             recalculated_p1, _ = analyzer._compute_price(analyzer.q1, analyzer.q2, analyzer.b_param)
             print("\n--- Parameter Verification ---")
@@ -263,6 +246,6 @@ if __name__ == "__main__":
             analyzer.display_price_impact(outcome_index=0, amounts=amounts_to_check)
             analyzer.display_price_impact(outcome_index=1, amounts=amounts_to_check)
         else:
-            log.error("Could not run analysis because B parameter inference failed.")
+            log.error("Could not run analysis because B parameter could not be loaded.")
     else:
         log.error("Could not run analysis due to data fetching/parsing errors.")

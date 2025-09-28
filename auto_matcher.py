@@ -181,14 +181,16 @@ def run_myriad_arb_check():
                     log.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                     continue
 
-                if m_prices['price1'] is None or m_prices['shares1'] is None or m_prices.get('price1_for_b') is None:
-                    log.warning(f"Skipping pair for {m_slug} due to missing price/share/price_for_b data in market object.")
+                if m_prices.get('price1') is None or m_prices.get('shares1') is None:
+                    log.warning(f"Skipping pair for {m_slug} due to missing price/share data in market object.")
                     continue
                 
                 Q1, Q2 = m_prices['shares1'], m_prices['shares2']
                 
-                P1_for_b = m_prices['price1_for_b']
-                inferred_B = myriad_model.infer_b(Q1, Q2, P1_for_b)
+                B_param = m_data.get('liquidity')
+                if not B_param or B_param <= 0:
+                    log.warning(f"Skipping pair for {m_slug} due to invalid or missing 'liquidity' parameter: {B_param}")
+                    continue
                 
                 order_book_poly_1, order_book_poly_2 = p_data.get('order_book_yes'), p_data.get('order_book_no')
                 
@@ -197,7 +199,7 @@ def run_myriad_arb_check():
                 
                 pair_opportunities = build_arbitrage_table_myriad(
                     Q1, Q2, order_book_poly_1, order_book_poly_2, 
-                    FEE_RATE_MYRIAD_BUY, inferred_B,
+                    FEE_RATE_MYRIAD_BUY, B_param,
                     P1_MYR_REALTIME=m_prices['price1']
                 )
 
@@ -211,6 +213,16 @@ def run_myriad_arb_check():
                     if summary.get("profit_usd", 0) > profit_threshold and \
                        summary.get("roi", 0) > 0.05 and \
                        summary.get("apy", 0) >= 5:
+                        
+                        # Add current prices to summary for enhanced notifications
+                        summary['myriad_current_price'] = m_prices['price1'] if summary['myriad_side'] == 1 else m_prices['price2']
+                        if summary['polymarket_side'] == 1 and order_book_poly_1:
+                            summary['poly_current_price'] = order_book_poly_1[0][0]
+                        elif summary['polymarket_side'] == 2 and order_book_poly_2:
+                            summary['poly_current_price'] = order_book_poly_2[0][0]
+                        else:
+                            summary['poly_current_price'] = None
+
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
                         pair_desc = f"{m_data['title']} <-> {p_data['question']}"
@@ -265,7 +277,7 @@ def run_myriad_arb_check():
                                     "amm_parameters": {
                                         "myriad_q1": Q1,
                                         "myriad_q2": Q2,
-                                        "myriad_inferred_b": inferred_B
+                                        "myriad_liquidity": B_param
                                     }
                                 }
                                 add_arb_opportunity(opportunity_message)

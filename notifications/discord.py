@@ -1,3 +1,4 @@
+# notifications/discord.py
 import requests
 import logging
 
@@ -55,6 +56,7 @@ class DiscordNotifier:
         payout_poly_win_usd = poly_shares
 
         bodega_url = f"{bodega_api_base.replace('/api', '')}/marketDetails?id={b_id}"
+        poly_url = f"https://polymarket.com/event/{p_id}"
 
         content = (
             f"@everyone\n"
@@ -68,6 +70,7 @@ class DiscordNotifier:
             f"   - **Link:** <{bodega_url}>\n\n"
             f"**2. Polymarket Hedge**\n"
             f"   - **Action:** Buy `{poly_shares}` **{poly_side}** shares.\n"
+            f"   - **Link:** <{poly_url}>\n"
             f"----------------------------------------\n"
             f"**Cost & Payout Analysis (USD):**\n"
             f"  - **Spent on Bodega:** `${total_cost_bod_usd:.2f}`\n"
@@ -87,16 +90,23 @@ class DiscordNotifier:
             return
 
         profit_usd, roi, apy = summary.get("profit_usd", 0), summary.get("roi", 0), summary.get("apy", 0)
-        inferred_B = summary.get("inferred_B", 0)
+        liquidity_param = summary.get("B", 0)
         myriad_shares, myriad_side = summary.get("myriad_shares", 0), summary.get("myriad_side_title", "?")
+        myriad_price = summary.get('myriad_current_price')
         total_cost_myr_usd = summary.get("cost_myr_usd", 0)
         poly_shares, poly_side = summary.get("polymarket_shares", 0), summary.get("polymarket_side_title", "?")
+        poly_price = summary.get('poly_current_price')
         cost_poly_usd = summary.get("cost_poly_usd", 0)
         
         payout_myriad_win_usd = myriad_shares
         payout_poly_win_usd = poly_shares
 
         myriad_url = f"https://app.myriad.social/markets/{m_slug}"
+        poly_url = f"https://polymarket.com/event/{p_id}"
+
+        # Format price strings, handle None case
+        myriad_price_str = f"**Current Price:** `${myriad_price:.4f}`\n   - " if myriad_price is not None else ""
+        poly_price_str = f"**Current Price:** `${poly_price:.4f}`\n   - " if poly_price is not None else ""
 
         content = (
             f"@everyone\n"
@@ -107,9 +117,10 @@ class DiscordNotifier:
             f"**Execution Plan:**\n"
             f"**1. Myriad Trade (Execute First!)**\n"
             f"   - **Action:** Buy `{myriad_shares}` **{myriad_side}** shares.\n"
-            f"   - **Link:** <{myriad_url}>\n\n"
+            f"   - {myriad_price_str}**Link:** <{myriad_url}>\n\n"
             f"**2. Polymarket Hedge**\n"
             f"   - **Action:** Buy `{poly_shares}` **{poly_side}** shares.\n"
+            f"   - {poly_price_str}**Link:** <{poly_url}>\n"
             f"----------------------------------------\n"
             f"**Cost & Payout Analysis (USD):**\n"
             f"  - **Spent on Myriad:** `${total_cost_myr_usd:.2f}`\n"
@@ -118,7 +129,7 @@ class DiscordNotifier:
             f"  - **Payout if Myriad wins:** `${payout_myriad_win_usd:.2f}`\n"
             f"  - **Payout if Polymarket wins:** `${payout_poly_win_usd:.2f}`\n"
             f"----------------------------------------\n\n"
-            f"*Parameters Used: Inferred B=`{inferred_B:.2f}`*"
+            f"*Parameters Used: Liquidity (B)=`{liquidity_param:.2f}`*"
         )
         self.send(content)
 
