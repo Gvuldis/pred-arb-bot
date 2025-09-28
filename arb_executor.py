@@ -395,15 +395,22 @@ def process_opportunity(opp: dict):
         log.error(f"Trade failed for {trade_id}: {e}")
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
         status = 'FAIL_PREFLIGHT' if 'Leg 1' not in str(e) and 'Leg 2' not in str(e) else 'FAIL_LEG1_EXECUTION' if 'Leg 1' in str(e) else 'FAIL_LEG2_EXECUTION'
-        trade_log.update({'status': status, 'status_message': str(e)})
-        db.log_trade_attempt(trade_log)
-        if notifier: notifier.notify_autotrade_failure(market_title, str(e), status)
-        if status == 'FAIL_LEG2_EXECUTION' and trade_log.get('executed_poly_shares', 0) > 0:
-            log.critical(f"!!!!!! PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
-            if notifier: notifier.notify_autotrade_panic(market_title, str(e))
-            unwind_result = unwind_polymarket_position(opp['market_identifiers']['polymarket_token_id_buy'], trade_log['executed_poly_shares']) if EXECUTION_MODE != "DRY_RUN" else {'success': True}
-            trade_log.update({'status': 'SUCCESS_RECONCILED' if unwind_result.get('success') else 'FAIL_RECONCILED'})
+        
+        # Only log and notify for actual execution failures, not pre-flight checks
+        if status != 'FAIL_PREFLIGHT':
+            trade_log.update({'status': status, 'status_message': str(e)})
             db.log_trade_attempt(trade_log)
+            if notifier: notifier.notify_autotrade_failure(market_title, str(e), status)
+            
+            if status == 'FAIL_LEG2_EXECUTION' and trade_log.get('executed_poly_shares', 0) > 0:
+                log.critical(f"!!!!!! PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
+                if notifier: notifier.notify_autotrade_panic(market_title, str(e))
+                unwind_result = unwind_polymarket_position(opp['market_identifiers']['polymarket_token_id_buy'], trade_log['executed_poly_shares']) if EXECUTION_MODE != "DRY_RUN" else {'success': True}
+                trade_log.update({'status': 'SUCCESS_RECONCILED' if unwind_result.get('success') else 'FAIL_RECONCILED'})
+                db.log_trade_attempt(trade_log)
+        else:
+            log.info(f"Pre-flight check failed for {trade_id}, not logging to DB. Reason: {e}")
+
     except Exception as e:
         log.critical(f"An unexpected error occurred processing {trade_id}: {e}", exc_info=True)
         trade_log.update({'status': 'FAIL_UNEXPECTED', 'status_message': str(e)})
@@ -426,5 +433,6 @@ def main_loop():
 if __name__ == "__main__":
     db.init_db()
     main_loop()
+
 
 

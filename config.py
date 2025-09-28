@@ -1,7 +1,9 @@
-# config.py
 import os
 import logging
 from dotenv import load_dotenv
+import json
+from web3 import Web3
+
 from services.bodega.client import BodegaClient
 from services.polymarket.client import PolymarketClient
 from services.myriad.client import MyriadClient
@@ -21,17 +23,41 @@ POLY_API = os.getenv("POLY_API")
 MYRIAD_API = "https://api-production.polkamarkets.com"
 COIN_API = os.getenv("COIN_API")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+ABSTRACT_RPC_URL = os.getenv("ABSTRACT_RPC_URL")
 
 # Fee constants for arbitrage calculation
 FEE_RATE_BODEGA = 0.02  # 4% total fee on Bodega (2% market + 2% protocol)
 FEE_RATE_MYRIAD_BUY = 0.03 # 3% total fee on Myriad buys
+
+# --- Web3 and Myriad Contract Setup ---
+myriad_contract = None
+if not ABSTRACT_RPC_URL:
+    log.warning("ABSTRACT_RPC_URL is not set in .env. Myriad on-chain price fetching will be disabled.")
+else:
+    try:
+        w3_abs = Web3(Web3.HTTPProvider(ABSTRACT_RPC_URL))
+        if not w3_abs.is_connected():
+            raise ConnectionError("Failed to connect to Abstract RPC")
+        
+        MYRIAD_MARKET_ADDRESS = "0x3e0f5F8F5FB043aBFA475C0308417Bf72c463289"
+        MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"}],"name":"getMarketOutcomePrice","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]')
+        
+        myriad_contract = w3_abs.eth.contract(
+            address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS),
+            abi=MYRIAD_MARKET_ABI
+        )
+        log.info("Successfully connected to Abstract RPC and initialized Myriad contract.")
+    except Exception as e:
+        log.error(f"Failed to initialize Web3 for Abstract, disabling on-chain prices: {e}")
+        myriad_contract = None
+
 
 # --- Singleton Clients ---
 # Initializing clients here makes them act as singletons for the application's lifetime.
 log.info("Initializing API clients...")
 b_client = BodegaClient(BODEGA_API)
 p_client = PolymarketClient(POLY_API)
-m_client = MyriadClient(MYRIAD_API)
+m_client = MyriadClient(MYRIAD_API, myriad_contract)
 fx_client = FXClient(COIN_API)
 
 if not WEBHOOK_URL:

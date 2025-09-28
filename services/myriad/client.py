@@ -1,13 +1,15 @@
-# services/myriad/client.py
 import requests
 import logging
+import math
 from typing import List, Dict, Optional
+from web3.contract import Contract
 
 log = logging.getLogger(__name__)
 
 class MyriadClient:
-    def __init__(self, api_url: str):
+    def __init__(self, api_url: str, myriad_contract: Optional[Contract]):
         self.api_url = api_url
+        self.contract = myriad_contract
 
     def fetch_markets(self) -> List[Dict]:
         """Fetch all active Myriad markets."""
@@ -36,62 +38,82 @@ class MyriadClient:
             
     def parse_realtime_prices(self, market_data: Dict) -> Optional[Dict]:
         """
-        Parses market data to extract prices, shares, and titles for both outcomes.
-        It prioritizes the most recent price from 'price_charts' for opportunity detection,
-        but also provides the lagging 'price' field for a stable B-parameter calculation.
+        Parses market data, gets live on-chain prices, and re-calculates
+        the AMM state (q0, q1) for accurate arbitrage calculations.
         """
         if not market_data or len(market_data.get("outcomes", [])) != 2:
             return None
 
         try:
-            outcomes = market_data.get("outcomes", [])
-            outcome0 = next(o for o in outcomes if o.get('id') == 0)
-            outcome1 = next(o for o in outcomes if o.get('id') == 1)
+            market_id = market_data.get('id')
+            if not market_id:
+                log.error(f"Market data for '{market_data.get('slug')}' is missing 'id'.")
+                return None
 
-            price1_realtime = None
-
-            # Step 1: Get the most up-to-date price for outcome 1 (usually "No") from its price chart.
-            price_charts = outcome1.get("price_charts")
-            if price_charts and isinstance(price_charts, list) and len(price_charts) > 0:
-                prices_list = price_charts[0].get("prices")
-                if prices_list and isinstance(prices_list, list) and len(prices_list) > 0:
-                    last_price_point = prices_list[-1]
-                    if "value" in last_price_point:
-                        price1_realtime = float(last_price_point["value"])
-                        log.info(f"Using real-time chart price for {market_data.get('slug')}: {price1_realtime}")
-
-            # Step 2: If the chart method fails, fall back to the main 'price' field from the outcome.
-            if price1_realtime is None:
-                price1_fallback = outcome1.get("price")
-                if price1_fallback is not None:
-                    price1_realtime = float(price1_fallback)
-                    log.warning(f"Falling back to main price field for {market_data.get('slug')}: {price1_realtime}")
-            
-            # Step 3: Validate the price for outcome 1 and derive outcome 0's price for arb checking.
-            if price1_realtime is None or not (0 <= price1_realtime <= 1):
-                log.error(f"Could not determine a valid real-time price for outcome 1 in market {market_data.get('slug')}")
+            # --- Step 1: Fetch live on-chain prices ---
+            if not self.contract:
+                log.warning("Myriad contract not initialized in config. Cannot fetch on-chain prices. Aborting price parse.")
                 return None
             
-            price0_derived_realtime = 1.0 - price1_realtime
+            log.info(f"Fetching on-chain price for Myriad market ID: {market_id}")
+            price0_scaled = self.contract.functions.getMarketOutcomePrice(market_id, 0).call()
+            price1_scaled = self.contract.functions.getMarketOutcomePrice(market_id, 1).call()
+            
+            price0_onchain = float(price0_scaled / 10**18)
+            price1_onchain = float(price1_scaled / 10**18)
+            
+            # Basic validation
+            if not (0 < price0_onchain < 1 and 0 < price1_onchain < 1 and abs(price0_onchain + price1_onchain - 1.0) < 0.01):
+                 log.error(f"Invalid or non-summing on-chain prices for market {market_id}: p0={price0_onchain}, p1={price1_onchain}. Skipping.")
+                 return None
+
+            # --- Step 2: Get other parameters from API data ---
+            outcomes = market_data.get("outcomes", [])
+            outcome0_api = next(o for o in outcomes if o.get('id') == 0)
+            outcome1_api = next(o for o in outcomes if o.get('id') == 1)
+
+            q0_lag = outcome0_api.get("shares_held")
+            q1_lag = outcome1_api.get("shares_held")
+            b_param = market_data.get("liquidity")
+
+            if None in [q0_lag, q1_lag, b_param] or b_param <= 0:
+                log.error(f"Missing shares_held or liquidity from API for market {market_id}. Cannot recalculate shares.")
+                return None
+
+            # --- Step 3: Recalculate q0 and q1 using the on-chain price ---
+            # We solve a system of two linear equations:
+            # 1. q0 - q1 = b * log(p0/p1)    (derived from the LMSR price formula)
+            # 2. q0 + q1 = q0_lag + q1_lag  (approximating total shares as constant)
+            
+            # Constraint 1: Difference of shares
+            c1 = b_param * math.log(price0_onchain / price1_onchain) # This is q0 - q1
+            
+            # Constraint 2: Sum of shares
+            c2 = q0_lag + q1_lag # This is approximately q0 + q1
+
+            # Solve the system
+            q0_recalc = (c1 + c2) / 2.0
+            q1_recalc = (c2 - c1) / 2.0
+            
+            log.info(f"Recalculated shares for {market_data.get('slug')} (ID {market_id}): "
+                     f"q0={q0_recalc:.2f}, q1={q1_recalc:.2f} (was q0={q0_lag:.2f}, q1={q1_lag:.2f})")
 
             return {
-                # Real-time prices for opportunity detection
-                "price1": price0_derived_realtime,
-                "price2": price1_realtime,
+                # Use on-chain prices for opportunity detection.
+                # 'price1'/'shares1' correspond to outcome 0, 'price2'/'shares2' to outcome 1.
+                "price1": price0_onchain,
+                "price2": price1_onchain,
                 
-                # Share data 
-                "shares1": outcome0.get("shares_held"),
-                "shares2": outcome1.get("shares_held"),
+                "shares1": q0_recalc,
+                "shares2": q1_recalc,
 
-                # Outcome titles
-                "title1": outcome0.get("title"),
-                "title2": outcome1.get("title"),
+                "title1": outcome0_api.get("title"),
+                "title2": outcome1_api.get("title"),
 
-                # Static liquidity parameter
-                "liquidity": market_data.get("liquidity"),
+                "liquidity": b_param,
             }
-        except (StopIteration, KeyError, IndexError, TypeError, ValueError) as e:
-            log.error(f"Error parsing real-time prices for Myriad market {market_data.get('slug')}: {e}", exc_info=True)
+        except Exception as e:
+            log.error(f"Error parsing on-chain prices for Myriad market {market_data.get('slug')}: {e}", exc_info=True)
             return None
 
     def fetch_prices(self, market_slug: str) -> Optional[Dict]:
