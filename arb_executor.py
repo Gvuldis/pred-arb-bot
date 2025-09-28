@@ -1,4 +1,3 @@
-# arb_executor.py
 import os
 import math
 import logging
@@ -123,7 +122,17 @@ def find_myriad_trade_details(market_id: int, expected_cost: float, myriad_addre
         try:
             response = requests.get(api_url, timeout=15)
             response.raise_for_status()
-            feed_data = response.json().get("data", [])
+            
+            # FIX: The API response can be a list directly, or a dictionary containing a 'data' key.
+            # This handles both cases to prevent the AttributeError.
+            json_response = response.json()
+            if isinstance(json_response, list):
+                feed_data = json_response
+            elif isinstance(json_response, dict):
+                feed_data = json_response.get("data", [])
+            else:
+                log.warning(f"[{trade_id}] Myriad feed API returned an unexpected type: {type(json_response)}")
+                feed_data = []
 
             for tx in feed_data:
                 tx_address_lower = tx.get("user_address", "").lower()
