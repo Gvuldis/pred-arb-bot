@@ -1,3 +1,4 @@
+# auto_matcher.py
 import logging
 import uuid
 import json
@@ -180,14 +181,12 @@ def run_myriad_arb_check():
                     log.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                     continue
 
-                # NEW: Check for all required fields: real-time price, shares, and lagging price for B
                 if m_prices['price1'] is None or m_prices['shares1'] is None or m_prices.get('price1_for_b') is None:
                     log.warning(f"Skipping pair for {m_slug} due to missing price/share/price_for_b data in market object.")
                     continue
                 
                 Q1, Q2 = m_prices['shares1'], m_prices['shares2']
                 
-                # NEW: Use the lagging price for a stable B parameter calculation
                 P1_for_b = m_prices['price1_for_b']
                 inferred_B = myriad_model.infer_b(Q1, Q2, P1_for_b)
                 
@@ -196,12 +195,15 @@ def run_myriad_arb_check():
                 if is_flipped:
                     order_book_poly_1, order_book_poly_2 = order_book_poly_2, order_book_poly_1
                 
-                pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, FEE_RATE_MYRIAD_BUY, inferred_B)
+                pair_opportunities = build_arbitrage_table_myriad(
+                    Q1, Q2, order_book_poly_1, order_book_poly_2, 
+                    FEE_RATE_MYRIAD_BUY, inferred_B,
+                    P1_MYR_REALTIME=m_prices['price1']
+                )
 
                 for summary in pair_opportunities:
                     summary['apy'] = calculate_apy(summary.get('roi', 0), final_end_date_ms)
                     
-                    # --- BUG FIX: Correct the Polymarket side label if the market is flipped ---
                     if is_flipped:
                         current_poly_side = summary['polymarket_side']
                         summary['polymarket_side'] = 2 if current_poly_side == 1 else 1

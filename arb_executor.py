@@ -329,7 +329,7 @@ def process_opportunity(opp: dict):
         # STEP 2: LEG 1 EXECUTION (POLYMARKET)
         log.info("--- Executing Leg 1 (Polymarket) ---")
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
-        
+
         existing_trade_ids = {t['id'] for t in clob_client.get_trades()} if EXECUTION_MODE != "DRY_RUN" else set()
         
         if EXECUTION_MODE == "DRY_RUN":

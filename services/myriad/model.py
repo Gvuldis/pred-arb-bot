@@ -259,14 +259,17 @@ def _iterative_search(calculation_func, **kwargs):
 def build_arbitrage_table_myriad(
     Q1_MYR: float, Q2_MYR: float,
     ORDER_BOOK_POLY_1: List[Tuple[float, int]], ORDER_BOOK_POLY_2: List[Tuple[float, int]],
-    FEE_RATE: float, B: float,
+    FEE_RATE: float, B: float, P1_MYR_REALTIME: float
 ) -> List[Dict[str, Any]]:
+    """
+    Calculates arbitrage opportunities using the real-time price for comparison.
+    """
     all_opportunities = []
     initial_cost_myr_usd = lmsr_cost(Q1_MYR, Q2_MYR, B)
 
     # --- Scenario 1: Buy Outcome 1 on Myriad, hedge with Outcome 2 on Polymarket ---
     if ORDER_BOOK_POLY_2:
-        p_myr_1_start = compute_price(Q1_MYR, Q2_MYR, B)[0]
+        p_myr_1_start = P1_MYR_REALTIME  # Use the real-time price for comparison
         p_poly_2_best_ask = ORDER_BOOK_POLY_2[0][0]
         implied_poly_1_price = 1 - p_poly_2_best_ask
         
@@ -305,7 +308,7 @@ def build_arbitrage_table_myriad(
 
     # --- Scenario 2: Buy Outcome 2 on Myriad, hedge with Outcome 1 on Polymarket ---
     if ORDER_BOOK_POLY_1:
-        p_myr_2_start = compute_price(Q1_MYR, Q2_MYR, B)[1]
+        p_myr_2_start = 1.0 - P1_MYR_REALTIME  # Use the real-time price for comparison
         p_poly_1_best_ask = ORDER_BOOK_POLY_1[0][0]
         implied_poly_2_price = 1 - p_poly_1_best_ask
         

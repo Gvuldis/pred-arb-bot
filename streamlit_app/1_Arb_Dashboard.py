@@ -1,3 +1,4 @@
+# streamlit_app/1_Arb_Dashboard.py
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -523,7 +524,6 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     apy = summary.get('apy', 0)
                     threshold = opp['profit_threshold']
 
-                    # --- FIX: Replaced unsafe_html with unsafe_allow_html ---
                     if profit > threshold and roi > 0.05 and apy >= 0.50:
                         st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
@@ -576,7 +576,6 @@ if st.button("Check All Manual Pairs for Arbitrage"):
             myriad_results = []
             for i, (m_slug, p_id, is_flipped, profit_threshold, end_date_override, _) in enumerate(manual_pairs_myriad_check, start=1):
                 try:
-                    # --- NEW: Fetch fresh data for each pair individually ---
                     m_data = m_client.fetch_market_details(m_slug)
                     p_data = p_client.fetch_market(p_id)
 
@@ -589,16 +588,16 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         dt_obj = datetime.fromisoformat(m_data["expires_at"].replace('Z', '+00:00'))
                         final_end_date_ms = int(dt_obj.timestamp() * 1000)
 
-                    # --- NEW: Use the robust real-time price parsing function ---
                     m_prices = m_client.parse_realtime_prices(m_data)
                     if not m_prices:
                         st.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                         continue
                     
-                    if m_prices['price1'] is None or m_prices['shares1'] is None: continue
+                    if m_prices['price1'] is None or m_prices['shares1'] is None or m_prices.get('price1_for_b') is None: continue
 
-                    Q1, Q2, P1 = m_prices['shares1'], m_prices['shares2'], m_prices['price1']
-                    inferred_B_myriad = infer_b_myriad(Q1, Q2, P1)
+                    Q1, Q2 = m_prices['shares1'], m_prices['shares2']
+                    P1_for_b = m_prices['price1_for_b']
+                    inferred_B_myriad = infer_b_myriad(Q1, Q2, P1_for_b)
 
                     obp1, obp2 = p_data.get('order_book_yes'), p_data.get('order_book_no')
                     p_name1, p_name2 = p_data.get('outcome_yes'), p_data.get('outcome_no')
@@ -606,7 +605,11 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         obp1, obp2 = obp2, obp1
                         p_name1, p_name2 = p_name2, p_name1
 
-                    pair_opps = build_arbitrage_table_myriad(Q1, Q2, obp1, obp2, FEE_RATE_MYRIAD_BUY, inferred_B_myriad)
+                    pair_opps = build_arbitrage_table_myriad(
+                        Q1, Q2, obp1, obp2, 
+                        FEE_RATE_MYRIAD_BUY, inferred_B_myriad,
+                        P1_MYR_REALTIME=m_prices['price1']
+                    )
 
                     for opp in pair_opps:
                         opp['apy'] = calculate_apy(opp.get('roi', 0), final_end_date_ms)
@@ -629,7 +632,6 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     profit, roi, apy = summary.get('profit_usd', 0), summary.get('roi', 0), summary.get('apy', 0)
                     threshold = opp['profit_threshold']
 
-                    # --- FIX: Replaced unsafe_html with unsafe_allow_html ---
                     if profit > threshold and roi > 0.025 and apy >= 0.50:
                         st.markdown(f"**<p style='color:green; font-size: 1.1em;'>PROFITABLE (>{threshold:.2f}$): {opp['description']}</p>**", unsafe_allow_html=True)
                     elif profit > 0:
