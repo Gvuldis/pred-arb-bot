@@ -115,12 +115,3 @@ class MyriadClient:
         except Exception as e:
             log.error(f"Error parsing on-chain prices for Myriad market {market_data.get('slug')}: {e}", exc_info=True)
             return None
-
-    def fetch_prices(self, market_slug: str) -> Optional[Dict]:
-        """
-        DEPRECATED in favor of parse_realtime_prices.
-        Fetch prices and liquidity shares for a given market slug.
-        Returns a dictionary with prices and shares for both outcomes.
-        """
-        market_data = self.fetch_market_details(market_slug)
-        return self.parse_realtime_prices(market_data)

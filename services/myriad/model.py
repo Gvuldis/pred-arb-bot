@@ -225,24 +225,11 @@ def _iterative_search(calculation_func, **kwargs):
         
     best_fine = max(all_outcomes, key=lambda x: x.get('score', -1e9))
 
-    # Stage 3: Super-fine search
-    if best_fine.get('score', -1) > 0:
-        best_adj_fine = best_fine['adjustment']
-        super_fine_start = max(0, best_adj_fine - 0.001)
-        # Generate 21 steps of 0.0001 around the best fine adjustment
-        super_fine_adjustments = [super_fine_start + i * 0.0001 for i in range(21)]
-
-        for adj in super_fine_adjustments:
-            outcome = calculation_func(target_adjustment=adj, **kwargs)
-            if outcome:
-                all_outcomes.append(outcome)
-
-    if not all_outcomes:
-        return None, []
-
-    best_overall = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+    # Stage 3: Super-fine search (REMOVED FOR PERFORMANCE)
+    # This stage provides minor precision improvements at the cost of more computation.
+    # The main bottleneck is network I/O, but this is a valid optimization for CPU usage.
     
-    return best_overall, all_outcomes
+    return best_fine, all_outcomes
 
 def build_arbitrage_table_myriad(
     Q1_MYR: float, Q2_MYR: float,

@@ -205,13 +205,24 @@ def run_myriad_arb_check():
         poly_positions = get_poly_positions()
         log.info(f"Found {len(myriad_positions)} Myriad market positions and {len(poly_positions)} Polymarket market positions.")
 
+        # --- OPTIMIZATION: Pre-fetch all Myriad market data to reduce API calls in the loop ---
+        try:
+            all_myriad_markets = m_client.fetch_markets()
+            myriad_market_map = {m['slug']: m for m in all_myriad_markets}
+            log.info(f"Pre-fetched {len(myriad_market_map)} Myriad market configs for arb check.")
+        except Exception as e:
+            log.error(f"Failed to pre-fetch Myriad markets for arb check: {e}. Aborting.")
+            return
+
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs:
             try:
+                # Use pre-fetched data instead of making a new API call
+                m_data = myriad_market_map.get(m_slug)
+
                 # ==========================================================
                 # 1. EARLY EXIT (SELL) CHECK
                 # ==========================================================
-                m_data = m_client.fetch_market_details(m_slug)
                 if not m_data or m_data.get('state') != 'open':
                     log.info(f"Myriad market {m_slug} is not open, skipping sell check.")
                     continue
