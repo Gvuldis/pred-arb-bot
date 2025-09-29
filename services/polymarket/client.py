@@ -20,11 +20,8 @@ class PolymarketClient:
     def fetch_market(self, condition_id: str) -> Dict:
         """
         Fetch a single Polymarket market by condition_id.
-        This now fetches the full order book for both outcomes
-        and derives the best price from it. It handles both traditional
-        'Yes'/'No' markets and other binary markets (e.g., player vs player).
+        This now fetches the full order book (bids and asks) for both outcomes.
         """
-        # Step 1: Fetch market details to get token IDs
         market_url = f"{self.api_url}/markets/{condition_id}"
         try:
             market_resp = requests.get(market_url, timeout=10)
@@ -32,88 +29,62 @@ class PolymarketClient:
             market_data = market_resp.json()
         except requests.exceptions.RequestException as e:
             log.error(f"Failed to fetch market data for {condition_id}: {e}")
-            return {
-                'condition_id': condition_id, 'question': 'FETCH_ERROR',
-                'price_yes': None, 'price_no': None,
-                'order_book_yes': [], 'order_book_no': [],
-                'active': False, 'closed': True,
-                'outcome_yes': 'Yes', 'outcome_no': 'No',
-                'token_id_yes': None, 'token_id_no': None,
-            }
+            return {'active': False, 'closed': True}
 
-        # Step 2: Identify the two outcome tokens.
         tokens = market_data.get("tokens", [])
-        token_1 = None
-        token_2 = None
-
-        if len(tokens) == 2:
-            token_yes_candidate = next((t for t in tokens if t.get("outcome") == "Yes"), None)
-            if token_yes_candidate:
-                token_1 = token_yes_candidate
-                token_2 = next((t for t in tokens if t.get("outcome") != "Yes"), None)
-            else:
-                token_1 = tokens[0]
-                token_2 = tokens[1]
+        token_1, token_2 = (tokens[0], tokens[1]) if len(tokens) == 2 else (None, None)
+        if 'Yes' in [t.get('outcome') for t in tokens]:
+             token_1 = next((t for t in tokens if t.get("outcome") == "Yes"), None)
+             token_2 = next((t for t in tokens if t.get("outcome") != "Yes"), None)
 
         token_1_id_str = token_1.get("token_id") if token_1 else None
         token_2_id_str = token_2.get("token_id") if token_2 else None
         
-        # --- FIX: Removed the unnecessary conversion to hex. ---
-        # token_1_id_hex = hex(int(token_1_id_str)) if token_1_id_str else None
-        # token_2_id_hex = hex(int(token_2_id_str)) if token_2_id_str else None
-        
         outcome_1_name = token_1.get("outcome") if token_1 else "Outcome 1"
         outcome_2_name = token_2.get("outcome") if token_2 else "Outcome 2"
 
-        order_book_1 = []
-        order_book_2 = []
+        order_book_1_asks, order_book_1_bids = [], []
+        order_book_2_asks, order_book_2_bids = [], []
 
-        # Step 3: Fetch order books for each token ID using the /book endpoint
         order_book_url = f"{self.api_url}/book"
-        try:
-            # Fetch order book for the first outcome
-            if token_1_id_str:
-                # --- FINAL FIX: Add side='buy' to the request parameters ---
-                params_book_1 = {"token_id": token_1_id_str, "side": "buy"}
-                book_1_resp = requests.get(order_book_url, params=params_book_1, timeout=10)
-                
-                if book_1_resp.status_code == 404:
-                    log.warning(f"Order book for token {token_1_id_str} (buy side) not found (404).")
-                else:
-                    book_1_resp.raise_for_status()
-                    asks_1 = book_1_resp.json().get("asks", [])
-                    order_book_1 = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks_1 if float(ask['size']) > 0], key=lambda x: x[0])
+        for i, token_id_str in enumerate([token_1_id_str, token_2_id_str]):
+            if not token_id_str: continue
+            try:
+                # Get ASKS (for buying)
+                asks_resp = requests.get(order_book_url, params={"token_id": token_id_str, "side": "sell"}, timeout=5)
+                if asks_resp.status_code == 200:
+                    asks = asks_resp.json().get("asks", [])
+                    book_asks = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks if float(ask['size']) > 0], key=lambda x: x[0])
+                    if i == 0: order_book_1_asks = book_asks
+                    else: order_book_2_asks = book_asks
 
-            # Fetch order book for the second outcome
-            if token_2_id_str:
-                # --- FINAL FIX: Add side='buy' to the request parameters ---
-                params_book_2 = {"token_id": token_2_id_str, "side": "buy"}
-                book_2_resp = requests.get(order_book_url, params=params_book_2, timeout=10)
+                # Get BIDS (for selling)
+                bids_resp = requests.get(order_book_url, params={"token_id": token_id_str, "side": "buy"}, timeout=5)
+                if bids_resp.status_code == 200:
+                    bids = bids_resp.json().get("bids", [])
+                    book_bids = sorted([(float(bid['price']), int(float(bid['size']))) for bid in bids if float(bid['size']) > 0], key=lambda x: x[0], reverse=True)
+                    if i == 0: order_book_1_bids = book_bids
+                    else: order_book_2_bids = book_bids
+            
+            except (requests.exceptions.RequestException, ValueError, TypeError) as e:
+                log.error(f"Failed to fetch or parse order book for token {token_id_str}: {e}")
 
-                if book_2_resp.status_code == 404:
-                    log.warning(f"Order book for token {token_2_id_str} (buy side) not found (404).")
-                else:
-                    book_2_resp.raise_for_status()
-                    asks_2 = book_2_resp.json().get("asks", [])
-                    order_book_2 = sorted([(float(ask['price']), int(float(ask['size']))) for ask in asks_2 if float(ask['size']) > 0], key=lambda x: x[0])
-
-        except (requests.exceptions.RequestException, ValueError, TypeError) as e:
-            log.error(f"Failed to fetch or parse order book for tokens in market {condition_id}: {e}")
-
-        # Step 4: Derive best price from order book (lowest ask) for reference
-        price_1 = order_book_1[0][0] if order_book_1 else None
-        price_2 = order_book_2[0][0] if order_book_2 else None
+        price_1 = order_book_1_asks[0][0] if order_book_1_asks else None
+        price_2 = order_book_2_asks[0][0] if order_book_2_asks else None
 
         return {
             'condition_id': condition_id,
             'question': market_data.get('question'),
             'price_yes': price_1,
             'price_no': price_2,
-            'order_book_yes': order_book_1,
-            'order_book_no': order_book_2,
+            'order_book_yes': order_book_1_asks, # For backward compatibility
+            'order_book_no': order_book_2_asks,   # For backward compatibility
+            'order_book_yes_asks': order_book_1_asks,
+            'order_book_yes_bids': order_book_1_bids,
+            'order_book_no_asks': order_book_2_asks,
+            'order_book_no_bids': order_book_2_bids,
             'outcome_yes': outcome_1_name,
             'outcome_no': outcome_2_name,
-            # --- FIX: Use the original decimal string token IDs ---
             'token_id_yes': token_1_id_str,
             'token_id_no': token_2_id_str,
             'active': market_data.get('active', False),

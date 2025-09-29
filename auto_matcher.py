@@ -1,10 +1,12 @@
-# auto_matcher.py
 import logging
 import uuid
 import json
 from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timezone
-from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log
+import requests
+import math
+
+from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
 from jobs.fetch_new_bodega import fetch_and_notify_new_bodega
 from jobs.fetch_new_myriad import fetch_and_notify_new_myriad
 from jobs.prune_inactive_pairs import prune_all_inactive_pairs
@@ -13,12 +15,57 @@ from streamlit_app.db import (
     save_polymarkets,
     load_probability_watches, delete_probability_watch,
     get_config_value, save_myriad_markets,
-    add_arb_opportunity
+    add_arb_opportunity, get_market_cooldown, update_market_cooldown
 )
 from matching.fuzzy import fetch_all_polymarket_clob_markets
 from services.polymarket.model import build_arbitrage_table, infer_b
-from services.myriad.model import build_arbitrage_table_myriad
+from services.myriad.model import build_arbitrage_table_myriad, calculate_sell_revenue, consume_order_book
 import services.myriad.model as myriad_model
+
+# --- POSITION TRACKING HELPERS ---
+def get_myriad_positions() -> dict:
+    """ Fetches current Myriad positions for all manually matched markets. """
+    if not myriad_account or not myriad_contract:
+        log.warning("Myriad account or contract not available for position check.")
+        return {}
+    
+    positions = {}
+    matched_markets = load_manual_pairs_myriad()
+    market_ids = {m_data['id'] for m_slug in {p[0] for p in matched_markets} if (m_data := m_client.fetch_market_details(m_slug))}
+
+    for market_id in market_ids:
+        try:
+            _liquidity, outcomes = myriad_contract.functions.getUserMarketShares(market_id, myriad_account.address).call()
+            # Shares are scaled by 1e6
+            shares_outcome_0 = outcomes[0] / 1e6
+            shares_outcome_1 = outcomes[1] / 1e6
+            if shares_outcome_0 > 1 or shares_outcome_1 > 1: # Threshold to ignore dust
+                positions[market_id] = {0: shares_outcome_0, 1: shares_outcome_1}
+        except Exception as e:
+            log.error(f"Failed to get Myriad shares for market {market_id}: {e}")
+    return positions
+
+def get_poly_positions() -> dict:
+    """ Fetches current Polymarket positions from the data API. """
+    if not POLYMARKET_PROXY_ADDRESS:
+        log.warning("Polymarket proxy address not available for position check.")
+        return {}
+    
+    positions = {}
+    try:
+        url = "https://data-api.polymarket.com/positions"
+        params = {"user": POLYMARKET_PROXY_ADDRESS, "sizeThreshold": 1}
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        
+        for pos in response.json():
+            positions[pos['conditionId']] = positions.get(pos['conditionId'], {})
+            positions[pos['conditionId']][pos['outcome']] = float(pos['size'])
+            
+    except Exception as e:
+        log.error(f"Failed to fetch Polymarket positions: {e}")
+    return positions
+
 
 def calculate_apy(roi: float, end_date_ms: int) -> float:
     """Calculates APY given ROI and an end date timestamp in milliseconds."""
@@ -144,7 +191,7 @@ def run_bodega_arb_check():
 
 def run_myriad_arb_check():
     """Checks for arbitrage opportunities in Myriad-Polymarket pairs."""
-    log.info("--- Starting MYRIAD arbitrage-check job ---")
+    log.info("--- Starting MYRIAD arbitrage-check job (with SELL check) ---")
     try:
         manual_pairs = load_manual_pairs_myriad()
         opportunities = []
@@ -153,16 +200,98 @@ def run_myriad_arb_check():
             log.info("No manual Myriad pairs to check. Skipping.")
             return
 
+        # Fetch current positions once before checking all pairs
+        myriad_positions = get_myriad_positions()
+        poly_positions = get_poly_positions()
+        log.info(f"Found {len(myriad_positions)} Myriad market positions and {len(poly_positions)} Polymarket market positions.")
+
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs:
             try:
-                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id}, Flipped={is_flipped}, Autotradeable={is_autotrade_safe} ---")
-
+                # ==========================================================
+                # 1. EARLY EXIT (SELL) CHECK
+                # ==========================================================
                 m_data = m_client.fetch_market_details(m_slug)
+                if not m_data or m_data.get('state') != 'open':
+                    log.info(f"Myriad market {m_slug} is not open, skipping sell check.")
+                    continue
+                
+                myriad_market_id = m_data.get('id')
+                myr_pos = myriad_positions.get(myriad_market_id, {})
+                poly_pos = poly_positions.get(p_id, {})
+
+                if myr_pos and poly_pos:
+                    log.info(f"Positions found for pair ({m_slug}, {p_id}). Checking for early exit.")
+                    p_data_sell = p_client.fetch_market(p_id)
+                    
+                    # Determine which outcomes are paired based on the flip flag
+                    # An arb position consists of opposing outcomes
+                    # Position 1: Myriad Outcome 0 (YES-like) vs Poly Outcome NO-like
+                    # Position 2: Myriad Outcome 1 (NO-like) vs Poly Outcome YES-like
+                    
+                    myr_s0, myr_s1 = myr_pos.get(0, 0), myr_pos.get(1, 0)
+                    poly_s_yes, poly_s_no = poly_pos.get(p_data_sell['outcome_yes'], 0), poly_pos.get(p_data_sell['outcome_no'], 0)
+                    
+                    paired_position = None
+                    if is_flipped:
+                        # Myriad 0 <-> Poly NO, Myriad 1 <-> Poly YES
+                        if myr_s0 > 0 and poly_s_yes > 0: paired_position = {'myr_outcome': 0, 'myr_shares': myr_s0, 'poly_outcome_name': p_data_sell['outcome_yes'], 'poly_shares': poly_s_yes, 'poly_token': p_data_sell['token_id_yes'], 'poly_book': p_data_sell['order_book_yes_bids']}
+                        if myr_s1 > 0 and poly_s_no > 0: paired_position = {'myr_outcome': 1, 'myr_shares': myr_s1, 'poly_outcome_name': p_data_sell['outcome_no'], 'poly_shares': poly_s_no, 'poly_token': p_data_sell['token_id_no'], 'poly_book': p_data_sell['order_book_no_bids']}
+                    else:
+                        # Myriad 0 <-> Poly YES, Myriad 1 <-> Poly NO
+                        if myr_s0 > 0 and poly_s_no > 0: paired_position = {'myr_outcome': 0, 'myr_shares': myr_s0, 'poly_outcome_name': p_data_sell['outcome_no'], 'poly_shares': poly_s_no, 'poly_token': p_data_sell['token_id_no'], 'poly_book': p_data_sell['order_book_no_bids']}
+                        if myr_s1 > 0 and poly_s_yes > 0: paired_position = {'myr_outcome': 1, 'myr_shares': myr_s1, 'poly_outcome_name': p_data_sell['outcome_yes'], 'poly_shares': poly_s_yes, 'poly_token': p_data_sell['token_id_yes'], 'poly_book': p_data_sell['order_book_yes_bids']}
+
+                    if paired_position:
+                        min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
+                        shares_to_sell = min(min_shares, 10.0) # Test limit of 10 shares
+                        
+                        m_prices = m_client.parse_realtime_prices(m_data)
+                        q1, q2, b = m_prices['shares1'], m_prices['shares2'], m_prices['liquidity']
+                        
+                        myr_revenue = 0
+                        if paired_position['myr_outcome'] == 0:
+                            myr_revenue = calculate_sell_revenue(q1, q2, b, shares_to_sell)
+                        else: # outcome 1
+                            myr_revenue = calculate_sell_revenue(q2, q1, b, shares_to_sell)
+                        
+                        _f, poly_revenue, _p = consume_order_book(paired_position['poly_book'], shares_to_sell)
+                        total_revenue = myr_revenue + poly_revenue
+                        
+                        log.info(f"[SELL CHECK] Pair ({m_slug}, {p_id}): min_shares={min_shares:.2f}, shares_to_sell={shares_to_sell:.2f}, Myriad revenue=${myr_revenue:.2f}, Poly revenue=${poly_revenue:.2f}, Total=${total_revenue:.2f}")
+
+                        if total_revenue > (shares_to_sell * 1.03) and total_revenue > min_shares:
+                            log.warning(f"Found profitable early exit for {m_slug}! Total revenue for {shares_to_sell} shares is ${total_revenue:.2f}.")
+                            # Queue sell opportunity
+                            sell_opp = {
+                                "type": "sell", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "market_identifiers": {
+                                    "myriad_slug": m_slug, "myriad_market_id": myriad_market_id,
+                                    "polymarket_condition_id": p_id,
+                                    "polymarket_token_id_sell": paired_position['poly_token'],
+                                },
+                                "market_details": {"myriad_title": m_data.get('title')},
+                                "trade_plan": {
+                                    "myriad_outcome_id_sell": paired_position['myr_outcome'],
+                                    "myriad_shares_to_sell": shares_to_sell,
+                                    "myriad_min_usd_receive": myr_revenue * 0.99, # 1% slippage
+                                    "polymarket_shares_to_sell": shares_to_sell,
+                                    "polymarket_limit_price": paired_position['poly_book'][0][0] if paired_position['poly_book'] else 0.01,
+                                },
+                                "profitability_metrics": {"estimated_profit_usd": total_revenue - shares_to_sell}
+                            }
+                            add_arb_opportunity(sell_opp)
+                            update_market_cooldown(f"myriad_{m_slug}_sell", datetime.now(timezone.utc).isoformat())
+
+                # ==========================================================
+                # 2. ARBITRAGE (BUY) CHECK
+                # ==========================================================
+                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id}, Flipped={is_flipped}, Autotradeable={is_autotrade_safe} ---")
+                
                 p_data = p_client.fetch_market(p_id)
 
-                if not all([m_data, p_data]) or m_data.get('state') != 'open' or not p_data.get('active') or p_data.get('closed'):
-                    log.warning(f"Skipping pair ({m_slug}, {p_id}) due to inactive/missing market data.")
+                if not p_data.get('active') or p_data.get('closed'):
+                    log.warning(f"Skipping BUY check for pair ({m_slug}, {p_id}) because Polymarket market is not active.")
                     continue
                 
                 market_expiry_utc = m_data.get("expires_at")
@@ -244,6 +373,7 @@ def run_myriad_arb_check():
                                     continue
 
                                 opportunity_message = {
+                                    "type": "buy", # Explicitly set type
                                     "opportunity_id": str(uuid.uuid4()),
                                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                                     "platform": "Myriad",
@@ -290,7 +420,7 @@ def run_myriad_arb_check():
             for pair, summary, m_slug, p_id in opportunities:
                 notifier.notify_arb_opportunity_myriad(pair, summary, m_slug, p_id)
         
-        log.info(f"Myriad arb check finished. Found {len(opportunities)} opportunities.")
+        log.info(f"Myriad arb check finished. Found {len(opportunities)} BUY opportunities.")
 
     except Exception as e:
         log.error(f"Myriad arbitrage check job failed entirely: {e}", exc_info=True)

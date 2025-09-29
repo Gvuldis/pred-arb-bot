@@ -1,4 +1,3 @@
-# notifications/discord.py
 import requests
 import logging
 
@@ -151,17 +150,25 @@ class DiscordNotifier:
         self.send(content)
 
     # --- ARB-EXECUTOR NOTIFICATIONS ---
-    def notify_autotrade_success(self, market_title: str, profit: float, poly_shares: float, poly_cost: float, myriad_cost_est: float):
+    def notify_autotrade_success(self, market_title: str, profit: float, poly_shares: float, poly_cost: float, myriad_cost_est: float, trade_type="BUY"):
+        trade_action = "EXECUTED" if trade_type == "BUY" else "CLOSED (SELL)"
+        poly_action = "Bought" if trade_type == "BUY" else "Sold"
+        myriad_action = "Sent" if trade_type == "BUY" else "Sent sell tx for"
+
         content = (
-            f"✅ @everyone **AUTOMATED ARB EXECUTED**\n\n"
+            f"✅ @everyone **AUTOMATED ARB {trade_action}**\n\n"
             f"**Market**: `{market_title}`\n"
             f"**Est. Profit**: `${profit:.2f}`\n\n"
             f"**Polymarket Leg:**\n"
-            f"- Bought `{poly_shares:.4f}` shares for `${poly_cost:.2f}`\n\n"
-            f"**Myriad Leg:**\n"
-            f"- Sent `${myriad_cost_est:.2f}` to buy shares.\n\n"
-            f"*Myriad trade details will be fetched from the API shortly...*"
+            f"- {poly_action} `{poly_shares:.4f}` shares"
         )
+        if trade_type == "BUY":
+            content += f" for `${poly_cost:.2f}`\n\n"
+            content += f"**Myriad Leg:**\n- {myriad_action} `${myriad_cost_est:.2f}` to buy shares.\n\n"
+            content += "*Myriad trade details will be fetched from the API shortly...*"
+        else:
+            content += "\n\n**Myriad Leg:**\n- Sell transaction sent."
+        
         self.send(content)
 
     def notify_myriad_trade_details_found(self, market_title: str, trade_id: str, myriad_shares: float, myriad_cost: float):
@@ -178,11 +185,13 @@ class DiscordNotifier:
         content = f"❌ **AUTOMATED ARB FAILED**: {market_title}.\n**Status**: `{status}`\n**Reason**: {reason}"
         self.send(content)
         
-    def notify_autotrade_panic(self, market_title: str, error_msg: str):
-        content = (f"🚨 @everyone **CRITICAL FAILURE: HEDGE FAILED** on {market_title}.\n"
-                   f"Succeeded on Polymarket, failed on Myriad. **ATTEMPTING TO UNWIND POSITION.**\n"
-                   f"MANUAL INTERVENTION MAY BE REQUIRED.\n"
-                   f"Error: {error_msg}")
+    def notify_autotrade_panic(self, market_title: str, error_msg: str, trade_type="BUY"):
+        action = "HEDGE" if trade_type == "BUY" else "SECOND SELL"
+        content = (f"🚨 @everyone **CRITICAL FAILURE: {action} FAILED** on {market_title}.\n"
+                   f"Succeeded on one leg, failed on the other. **MANUAL INTERVENTION MAY BE REQUIRED.**\n")
+        if trade_type == "BUY":
+            content += "ATTEMPTING TO UNWIND POSITION.\n"
+        content += f"Error: {error_msg}"
         self.send(content)
 
     def notify_autotrade_dry_run(self, market_title: str, profit: float):

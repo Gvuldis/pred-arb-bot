@@ -19,6 +19,20 @@ def lmsr_cost(q1: float, q2: float, b: float) -> float:
     if b <= 0: raise ValueError("B parameter must be positive.")
     return b * logsumexp([q1/b, q2/b])
 
+def calculate_sell_revenue(q1_initial: float, q2_initial: float, b: float, shares_to_sell: float, fee_rate: float = 0.0) -> float:
+    """Calculates the revenue from selling shares, including fees."""
+    if shares_to_sell <= 0:
+        return 0.0
+    # Ensure we don't sell more shares than available in the pool
+    if shares_to_sell > q1_initial:
+        log.warning(f"Attempting to sell {shares_to_sell} shares, but only {q1_initial} available. Capping sell amount.")
+        shares_to_sell = q1_initial
+        
+    initial_pool_cost = lmsr_cost(q1_initial, q2_initial, b)
+    final_pool_cost = lmsr_cost(q1_initial - shares_to_sell, q2_initial, b)
+    revenue_pre_fee = initial_pool_cost - final_pool_cost
+    return revenue_pre_fee * (1 - fee_rate)
+
 def solve_shares_for_cost(
     q1_initial: float, q2_initial: float, b: float,
     max_cost: float, fee_rate: float,

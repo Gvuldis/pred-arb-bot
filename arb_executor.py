@@ -56,7 +56,7 @@ if not all([ABSTRACT_RPC_URL, POLY_PVT_KEY, MYRIAD_PVT_KEY, POLY_PROXY_ADDRESS])
 ABSTRACT_USDC_ADDRESS = "0x84a71ccd554cc1b02749b35d22f684cc8ec987e1"
 MYRIAD_MARKET_ADDRESS = "0x3e0f5F8F5FB043aBFA475C0308417Bf72c463289"
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"}]')
-MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"},{"internalType":"uint256","name":"minOutcomeSharesToBuy","type":"uint256"},{"internalType":"uint256","name":"value","type":"uint256"}],"name":"buy","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
+MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"},{"internalType":"uint256","name":"minOutcomeSharesToBuy","type":"uint256"},{"internalType":"uint256","name":"value","type":"uint256"}],"name":"buy","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"maxOutcomeSharesToSell","type":"uint256"}],"name":"sell","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
 
 # --- Client Initialization ---
 # Myriad (requires Web3)
@@ -199,6 +199,21 @@ def execute_polymarket_buy(token_id: str, price: float, size: float) -> dict:
         log.error(f"[POLY] FAK Order execution failed: {e}", exc_info=True)
         return {'success': False, 'error': str(e), 'response': {}}
 
+def execute_polymarket_sell(token_id: str, price: float, size: float) -> dict:
+    """Executes a FAK sell order on Polymarket."""
+    # Price for a sell order is the minimum price we'll accept. To sell into the bid book,
+    # we can set the price to the best bid to ensure it fills at that price or better.
+    log.info(f"[POLY] Executing SELL FAK. Token: {token_id} | price={price:.2f}, size={size:.4f}")
+    try:
+        order_args = OrderArgs(price=price, size=size, side=SELL, token_id=token_id)
+        signed_order = clob_client.create_order(order_args)
+        resp = clob_client.post_order(signed_order, OrderType.FAK)
+        log.info(f"[POLY] FAK Sell Order response: {resp}")
+        return {'success': resp.get('success', False), 'response': resp}
+    except Exception as e:
+        log.error(f"[POLY] FAK Sell Order execution failed: {e}", exc_info=True)
+        return {'success': False, 'error': str(e), 'response': {}}
+
 def unwind_polymarket_position(token_id: str, size: float) -> dict:
     log.warning(f"[PANIC][POLY] Attempting to unwind by SELLING {size:.2f} of token {token_id} at price 0.01")
     final_size = float(f"{size:.2f}")
@@ -260,9 +275,124 @@ def execute_myriad_buy(market_id: int, outcome_id: int, usdc_amount: float) -> d
         log.error(f"[MYRIAD] Buy execution failed: {e}", exc_info=True)
         return {'success': False, 'error': str(e)}
 
+def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, min_usdc_receive: float) -> dict:
+    """Executes a sell order on Myriad."""
+    log.info(f"[MYRIAD] Executing SELL. Market: {market_id}, Outcome: {outcome_id}, Shares: {shares_to_sell:.4f}, Min USDC: {min_usdc_receive:.4f}")
+    try:
+        market_contract = w3_abs.eth.contract(address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS), abi=MYRIAD_MARKET_ABI)
+        # Both shares and USDC are scaled by 1e6 on Myriad's contract
+        shares_wei = int(shares_to_sell * (10**6))
+        usdc_wei = int(min_usdc_receive * (10**6))
+
+        log.info(f"[MYRIAD] Building sell transaction with shares_wei={shares_wei}, usdc_wei={usdc_wei}")
+        nonce = w3_abs.eth.get_transaction_count(myriad_account.address)
+        gas_price = w3_abs.eth.gas_price
+        
+        # sell(marketId, outcomeId, minUsdcToReceive, maxSharesToSell)
+        sell_tx = market_contract.functions.sell(market_id, outcome_id, usdc_wei, shares_wei).build_transaction({
+            'from': myriad_account.address, 
+            'nonce': nonce, 
+            'gasPrice': gas_price
+        })
+
+        signed_sell = w3_abs.eth.account.sign_transaction(sell_tx, private_key=MYRIAD_PVT_KEY)
+        tx_hash = w3_abs.eth.send_raw_transaction(signed_sell.raw_transaction)
+        log.info(f"[MYRIAD] Sell transaction sent. Tx Hash: {tx_hash.hex()}")
+        receipt = w3_abs.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+        if receipt['status'] != 1:
+            return {'success': False, 'error': 'Transaction reverted', 'tx_hash': tx_hash.hex()}
+        
+        return {'success': True, 'tx_hash': tx_hash.hex()}
+    except Exception as e:
+        log.error(f"[MYRIAD] Sell execution failed: {e}", exc_info=True)
+        return {'success': False, 'error': str(e)}
+
 # ==============================================================================
 # 3. CORE ARBITRAGE LOGIC
 # ==============================================================================
+def process_sell_opportunity(opp: dict):
+    """Processes an opportunity to sell an existing position for early profit."""
+    trade_id, myriad_slug, poly_id = opp['opportunity_id'], opp['market_identifiers']['myriad_slug'], opp['market_identifiers']['polymarket_condition_id']
+    market_title = opp['market_details']['myriad_title']
+    log.info(f"--- Processing SELL opportunity {trade_id} for '{market_title}' ---")
+    log.info(f"Full sell opportunity details: {json.dumps(opp, indent=2)}")
+
+    trade_log = {'trade_id': trade_id, 'attempt_timestamp_utc': datetime.now(timezone.utc).isoformat(), 'myriad_slug': myriad_slug, 'polymarket_condition_id': poly_id, 'log_details': opp}
+    market_key = f"myriad_{myriad_slug}_sell" # Use a separate cooldown key for sells
+
+    try:
+        # STEP 1: PRE-FLIGHT CHECKS
+        log.info("--- Performing pre-flight checks for SELL ---")
+        if get_abstract_eth_balance() < MIN_ETH_BALANCE: raise ValueError(f"Insufficient gas on Myriad for sell.")
+        last_trade_ts = db.get_market_cooldown(market_key)
+        if last_trade_ts and datetime.now(timezone.utc) < (datetime.fromisoformat(last_trade_ts) + timedelta(minutes=TRADE_COOLDOWN_MINUTES)): raise ValueError(f"Market is on sell cooldown.")
+
+        # Re-verify profitability before executing
+        m_data = m_client.fetch_market_details(myriad_slug)
+        p_data = p_client.fetch_market(poly_id)
+        if not m_data or m_data.get('state') != 'open' or not p_data or not p_data.get('active'):
+            raise ValueError("One of the markets is no longer active.")
+        
+        # This re-verification is complex, for now we trust the opportunity from the matcher
+        # as it runs very frequently. A full re-calc would need position data again.
+        log.info("✅ All Pre-flight checks for SELL passed.")
+
+        # STEP 2: EXECUTE SELLS
+        db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        plan = opp['trade_plan']
+
+        # LEG 1: POLYMARKET SELL
+        log.info(f"--- Executing Leg 1 (Polymarket SELL) ---")
+        if EXECUTION_MODE == "DRY_RUN":
+            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_sell'])}}
+        else:
+            poly_result = execute_polymarket_sell(
+                opp['market_identifiers']['polymarket_token_id_sell'],
+                plan['polymarket_limit_price'],
+                plan['polymarket_shares_to_sell']
+            )
+        if not poly_result.get('success'):
+            raise RuntimeError(f"Failed Leg 1 (Poly SELL): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")
+        log.info(f"✅ Leg 1 (Poly SELL) SUCCESS.")
+
+        # LEG 2: MYRIAD SELL
+        log.info(f"--- Executing Leg 2 (Myriad SELL) ---")
+        if EXECUTION_MODE == "DRY_RUN":
+            myriad_result = {'success': True, 'tx_hash': 'dry_run_hash_sell'}
+        else:
+            myriad_result = execute_myriad_sell(
+                opp['market_identifiers']['myriad_market_id'],
+                plan['myriad_outcome_id_sell'],
+                plan['myriad_shares_to_sell'],
+                plan['myriad_min_usd_receive']
+            )
+        if not myriad_result.get('success'):
+            # This is a critical failure - we sold on Poly but not Myriad.
+            # We are now unhedged. A real implementation might try to buy back. For now, CRITICAL ALERT.
+            raise RuntimeError(f"Failed Leg 2 (Myriad SELL): {myriad_result.get('error')}")
+
+        log.info("✅ Both SELL legs executed successfully!")
+        trade_log.update({
+            'status': 'SUCCESS_SELL', 
+            'status_message': 'Both sell legs executed.', 
+            'poly_tx_hash': json.dumps(poly_result.get('response', {})),
+            'myriad_tx_hash': myriad_result.get('tx_hash'),
+            'final_profit_usd': opp['profitability_metrics']['estimated_profit_usd']
+        })
+        db.log_trade_attempt(trade_log)
+
+        if EXECUTION_MODE != "DRY_RUN" and notifier:
+            notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], plan['polymarket_shares_to_sell'], 0, 0, trade_type="SELL")
+    except (ValueError, RuntimeError) as e:
+        log.error(f"SELL trade failed for {trade_id}: {e}")
+        db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        if notifier: notifier.notify_autotrade_failure(market_title, str(e), "FAIL_SELL")
+        if 'Leg 2' in str(e): # Critical failure after selling on one leg
+            log.critical(f"!!!!!! SELL PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
+            if notifier: notifier.notify_autotrade_panic(market_title, str(e), trade_type="SELL")
+
+
 def process_opportunity(opp: dict):
     trade_id, myriad_slug, poly_id, token_id, market_title = opp['opportunity_id'], opp['market_identifiers']['myriad_slug'], opp['market_identifiers']['polymarket_condition_id'], opp['market_identifiers']['polymarket_token_id_buy'], opp['market_details']['myriad_title']
     log.info(f"--- Processing opportunity {trade_id} for '{market_title}' ---")
@@ -422,8 +552,13 @@ def main_loop():
     while True:
         try:
             opportunity = db.pop_arb_opportunity()
-            if opportunity: process_opportunity(opportunity)
-            else: time.sleep(5)
+            if opportunity:
+                if opportunity.get('type') == 'sell':
+                    process_sell_opportunity(opportunity)
+                else: # Default to buy
+                    process_opportunity(opportunity)
+            else:
+                time.sleep(5)
         except Exception as e:
             log.error(f"Error in main loop: {e}", exc_info=True)
             time.sleep(30)
