@@ -10,7 +10,7 @@ import json
 import logging
 import requests
 from config import POLYMARKET_PROXY_ADDRESS, myriad_account, myriad_contract
-from streamlit_app.db import get_conn, get_all_traded_myriad_market_info, clear_all_trade_logs
+from streamlit_app.db import get_conn, get_active_matched_myriad_market_info, clear_all_trade_logs
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def get_poly_positions(user_address: str):
 @st.cache_data(ttl=60)
 def get_myriad_positions(user_address: str):
     """
-    Fetches user shares for all traded Myriad markets from the smart contract.
+    Fetches user shares for all manually matched Myriad markets from the smart contract.
     Returns both a DataFrame of positions and a detailed debug log.
     """
     debug_log = []
@@ -63,15 +63,16 @@ def get_myriad_positions(user_address: str):
     
     debug_log.append(f"ℹ️ Checking Myriad positions for address: {user_address}")
     
-    traded_markets = get_all_traded_myriad_market_info()
-    if not traded_markets:
-        debug_log.append("🤔 No previously traded Myriad markets found in the bot's log. Nothing to check for positions.")
+    # NEW LOGIC: Use manually matched markets instead of traded markets.
+    matched_markets = get_active_matched_myriad_market_info()
+    if not matched_markets:
+        debug_log.append("🤔 No manually matched Myriad markets found in the database. Nothing to check for positions.")
         return pd.DataFrame(), debug_log
         
-    debug_log.append(f"🔎 Found {len(traded_markets)} traded market(s) to check: {[m['slug'] for m in traded_markets]}")
+    debug_log.append(f"🔎 Found {len(matched_markets)} manually matched market(s) to check: {[m['slug'] for m in matched_markets]}")
     positions = []
     
-    for market in traded_markets:
+    for market in matched_markets:
         market_id = market.get('id')
         market_slug = market.get('slug', 'N/A')
         debug_log.append(f"\n--- Checking market: '{market_slug}' (ID: {market_id}) ---")
@@ -133,7 +134,7 @@ with pos_tab2:
         with st.spinner("Fetching Myriad positions from on-chain data..."):
             df_myriad_pos, myriad_debug_log = get_myriad_positions(myriad_account.address)
             if df_myriad_pos.empty:
-                st.info("No open positions found on Myriad for any markets the bot has traded.")
+                st.info("No open positions found on Myriad for any of your manually matched markets.")
             else:
                 st.dataframe(df_myriad_pos, use_container_width=True, hide_index=True)
             

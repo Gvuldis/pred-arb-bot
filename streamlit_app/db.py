@@ -489,6 +489,20 @@ def get_all_traded_myriad_market_info() -> list:
         """).fetchall()
         return [dict(r) for r in rows]
 
+def get_active_matched_myriad_market_info() -> list:
+    """
+    Returns a list of dicts with unique market info for all markets
+    that have been manually paired.
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT T2.id, T2.slug, T2.name
+            FROM manual_pairs_myriad AS T1
+            JOIN myriad_markets AS T2 ON T1.myriad_slug = T2.slug
+            WHERE T2.id IS NOT NULL
+        """).fetchall()
+        return [dict(r) for r in rows]
+
 def clear_all_trade_logs() -> int:
     """Deletes all entries from the automated_trades_log table."""
     with get_conn() as conn:
