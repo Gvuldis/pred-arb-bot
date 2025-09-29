@@ -1,4 +1,3 @@
-# streamlit_app/db.py
 import sqlite3
 from pathlib import Path
 import time
@@ -475,3 +474,37 @@ def update_market_cooldown(market_key: str, timestamp_utc: str):
     with get_conn() as conn:
         conn.execute("INSERT OR REPLACE INTO market_cooldowns (market_key, last_trade_attempt_utc) VALUES (?, ?)", (market_key, timestamp_utc))
         conn.commit()
+
+def get_all_traded_myriad_market_info() -> list:
+    """
+    Returns a list of dicts with unique market info for all markets
+    that have been involved in an automated trade attempt.
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT T2.id, T2.slug, T2.name
+            FROM automated_trades_log AS T1
+            JOIN myriad_markets AS T2 ON T1.myriad_slug = T2.slug
+            WHERE T2.id IS NOT NULL
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+def clear_all_trade_logs() -> int:
+    """Deletes all entries from the automated_trades_log table."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            count_row = cur.execute("SELECT COUNT(*) FROM automated_trades_log").fetchone()
+            count = count_row[0] if count_row else 0
+            
+            if count > 0:
+                cur.execute("DELETE FROM automated_trades_log")
+                log.warning(f"Cleared {count} trade logs.")
+            
+            conn.commit()
+            return count
+        except Exception as e:
+            conn.rollback()
+            log.error(f"Error clearing trade logs: {e}", exc_info=True)
+            return 0

@@ -1,4 +1,4 @@
-import sys, pathlib
+import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 if str(ROOT) not in sys.path:
@@ -7,12 +7,103 @@ if str(ROOT) not in sys.path:
 import streamlit as st
 import pandas as pd
 import json
-from streamlit_app.db import get_conn
 import logging
+import requests
+from config import POLYMARKET_PROXY_ADDRESS, myriad_account, myriad_contract
+from streamlit_app.db import get_conn, get_all_traded_myriad_market_info, clear_all_trade_logs
 
 log = logging.getLogger(__name__)
 
 st.set_page_config(layout="wide", page_title="Automated Trade Log")
+
+# --- CURRENT POSITIONS ---
+st.header("Current Positions")
+
+@st.cache_data(ttl=60)
+def get_poly_positions(user_address: str):
+    """Fetches and processes current positions from the Polymarket Data API."""
+    if not user_address:
+        return pd.DataFrame()
+    try:
+        url = "https://data-api.polymarket.com/positions"
+        params = {"user": user_address, "sizeThreshold": 0.0001}
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        positions = response.json()
+        if not positions:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(positions)
+        df_display = df[['title', 'outcome', 'size', 'avgPrice', 'curPrice', 'currentValue', 'cashPnl', 'percentPnl']]
+        df_display = df_display.rename(columns={
+            'title': 'Market', 'outcome': 'Outcome', 'size': 'Shares', 'avgPrice': 'Avg. Price',
+            'curPrice': 'Current Price', 'currentValue': 'Value ($)', 'cashPnl': 'PnL ($)', 'percentPnl': 'PnL (%)'
+        })
+        return df_display
+    except Exception as e:
+        log.error(f"Failed to fetch Polymarket positions: {e}")
+        st.error(f"Could not fetch Polymarket positions: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def get_myriad_positions(user_address: str):
+    """Fetches user shares for all traded Myriad markets from the smart contract."""
+    if not user_address or not myriad_contract:
+        return pd.DataFrame()
+    
+    traded_markets = get_all_traded_myriad_market_info()
+    positions = []
+    
+    for market in traded_markets:
+        try:
+            market_id = market['id']
+            _liquidity, outcomes = myriad_contract.functions.getUserMarketShares(market_id, user_address).call()
+            
+            # Per user request, shares are scaled by 10^6 and should be integer
+            shares_outcome_0 = int(outcomes[0] / 1e6)
+            shares_outcome_1 = int(outcomes[1] / 1e6)
+
+            if shares_outcome_0 > 0:
+                positions.append({'Market': market['name'], 'Outcome Index': 0, 'Shares': shares_outcome_0})
+            if shares_outcome_1 > 0:
+                positions.append({'Market': market['name'], 'Outcome Index': 1, 'Shares': shares_outcome_1})
+        except Exception as e:
+            log.error(f"Failed to get Myriad shares for market {market.get('slug', 'N/A')}: {e}")
+
+    return pd.DataFrame(positions)
+
+
+pos_tab1, pos_tab2 = st.tabs(["Polymarket Positions", "Myriad Positions"])
+
+with pos_tab1:
+    if not POLYMARKET_PROXY_ADDRESS:
+        st.warning("`POLYMARKET_PROXY_ADDRESS` not set in .env file.")
+    else:
+        with st.spinner("Fetching Polymarket positions..."):
+            df_poly_pos = get_poly_positions(POLYMARKET_PROXY_ADDRESS)
+            if df_poly_pos.empty:
+                st.info("No open positions found on Polymarket.")
+            else:
+                st.dataframe(df_poly_pos, use_container_width=True, hide_index=True, column_config={
+                    "Shares": st.column_config.NumberColumn(format="%.2f"),
+                    "Value ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "PnL ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "PnL (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                })
+
+with pos_tab2:
+    if not myriad_account:
+        st.warning("`MYRIAD_PRIVATE_KEY` not set in .env file.")
+    else:
+        with st.spinner("Fetching Myriad positions from on-chain data..."):
+            df_myriad_pos = get_myriad_positions(myriad_account.address)
+            if df_myriad_pos.empty:
+                st.info("No open positions found on Myriad for traded markets.")
+            else:
+                st.dataframe(df_myriad_pos, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
 st.title("🤖 Automated Trade Log")
 
 @st.cache_data(ttl=30)
@@ -98,4 +189,32 @@ else:
                     log_details = json.loads(row['log_details'])
                     st.json(log_details, expanded=False)
                 except (json.JSONDecodeError, TypeError):
-                    st.text(row['log_details'])
+                    st.text(row['log_details'])
+
+st.markdown("---")
+st.subheader("🚨 Admin Actions")
+with st.expander("Clear Trade Log History"):
+    st.warning("This will permanently delete all automated trade logs from the database. This action cannot be undone.")
+    
+    if 'confirm_delete_logs' not in st.session_state:
+        st.session_state['confirm_delete_logs'] = False
+
+    if st.button("DELETE ALL LOGS"):
+        st.session_state['confirm_delete_logs'] = True
+    
+    if st.session_state['confirm_delete_logs']:
+        st.error("Are you absolutely sure?")
+        col1, col2, _ = st.columns([1,1,4])
+        with col1:
+            if st.button("Yes, DELETE", type="primary"):
+                with st.spinner("Deleting logs..."):
+                    deleted_count = clear_all_trade_logs()
+                    st.success(f"Successfully deleted {deleted_count} trade logs.")
+                    st.session_state['confirm_delete_logs'] = False
+                    st.cache_data.clear()
+                    time.sleep(2)
+                    st.rerun()
+        with col2:
+            if st.button("Cancel"):
+                st.session_state['confirm_delete_logs'] = False
+                st.rerun()

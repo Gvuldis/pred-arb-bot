@@ -1,4 +1,3 @@
-# arb_executor.py
 import os
 import math
 import logging
@@ -17,7 +16,7 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 # --- Local Project Imports ---
-from config import m_client, p_client, notifier, log, FEE_RATE_MYRIAD_BUY
+from config import m_client, p_client, notifier, log, FEE_RATE_MYRIAD_BUY, myriad_account
 import streamlit_app.db as db
 import services.myriad.model as myriad_model
 
@@ -62,7 +61,6 @@ MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"ma
 # --- Client Initialization ---
 # Myriad (requires Web3)
 w3_abs = Web3(Web3.HTTPProvider(ABSTRACT_RPC_URL))
-myriad_account = w3_abs.eth.account.from_key(MYRIAD_PVT_KEY)
 
 TWO_DP   = Decimal("0.01")
 FOUR_DP  = Decimal("0.0001")
@@ -433,6 +431,3 @@ def main_loop():
 if __name__ == "__main__":
     db.init_db()
     main_loop()
-
-
-

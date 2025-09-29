@@ -24,6 +24,8 @@ MYRIAD_API = "https://api-production.polkamarkets.com"
 COIN_API = os.getenv("COIN_API")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 ABSTRACT_RPC_URL = os.getenv("ABSTRACT_RPC_URL")
+POLYMARKET_PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS")
+MYRIAD_PRIVATE_KEY = os.getenv("MYRIAD_PRIVATE_KEY")
 
 # Fee constants for arbitrage calculation
 FEE_RATE_BODEGA = 0.02  # 4% total fee on Bodega (2% market + 2% protocol)
@@ -31,16 +33,24 @@ FEE_RATE_MYRIAD_BUY = 0.03 # 3% total fee on Myriad buys
 
 # --- Web3 and Myriad Contract Setup ---
 myriad_contract = None
+myriad_account = None
+
 if not ABSTRACT_RPC_URL:
-    log.warning("ABSTRACT_RPC_URL is not set in .env. Myriad on-chain price fetching will be disabled.")
+    log.warning("ABSTRACT_RPC_URL is not set in .env. Myriad on-chain interactions will be disabled.")
 else:
     try:
         w3_abs = Web3(Web3.HTTPProvider(ABSTRACT_RPC_URL))
         if not w3_abs.is_connected():
             raise ConnectionError("Failed to connect to Abstract RPC")
         
+        if MYRIAD_PRIVATE_KEY:
+            myriad_account = w3_abs.eth.account.from_key(MYRIAD_PRIVATE_KEY)
+            log.info(f"Initialized Myriad account: {myriad_account.address}")
+        else:
+            log.warning("MYRIAD_PRIVATE_KEY not set. Myriad wallet interactions will be disabled.")
+        
         MYRIAD_MARKET_ADDRESS = "0x3e0f5F8F5FB043aBFA475C0308417Bf72c463289"
-        MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"}],"name":"getMarketOutcomePrice","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]')
+        MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"}],"name":"getMarketOutcomePrice","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"address","name":"user","type":"address"}],"name":"getUserMarketShares","outputs":[{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256[]","name":"outcomes","type":"uint256[]"}],"stateMutability":"view","type":"function"}]')
         
         myriad_contract = w3_abs.eth.contract(
             address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS),
@@ -50,6 +60,7 @@ else:
     except Exception as e:
         log.error(f"Failed to initialize Web3 for Abstract, disabling on-chain prices: {e}")
         myriad_contract = None
+        myriad_account = None
 
 
 # --- Singleton Clients ---
