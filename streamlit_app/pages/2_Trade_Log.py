@@ -26,7 +26,8 @@ def get_poly_positions(user_address: str):
         return pd.DataFrame()
     try:
         url = "https://data-api.polymarket.com/positions"
-        params = {"user": user_address, "sizeThreshold": 0.0001}
+        # FIX: Set sizeThreshold to 1 to filter out positions with less than 1 share.
+        params = {"user": user_address, "sizeThreshold": 1}
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
         positions = response.json()
@@ -47,30 +48,64 @@ def get_poly_positions(user_address: str):
 
 @st.cache_data(ttl=60)
 def get_myriad_positions(user_address: str):
-    """Fetches user shares for all traded Myriad markets from the smart contract."""
-    if not user_address or not myriad_contract:
-        return pd.DataFrame()
+    """
+    Fetches user shares for all traded Myriad markets from the smart contract.
+    Returns both a DataFrame of positions and a detailed debug log.
+    """
+    debug_log = []
+    
+    if not user_address:
+        debug_log.append("❌ Error: Myriad user address is not available. Check .env configuration.")
+        return pd.DataFrame(), debug_log
+    if not myriad_contract:
+        debug_log.append("❌ Error: Myriad smart contract is not initialized. Check RPC connection and config.")
+        return pd.DataFrame(), debug_log
+    
+    debug_log.append(f"ℹ️ Checking Myriad positions for address: {user_address}")
     
     traded_markets = get_all_traded_myriad_market_info()
+    if not traded_markets:
+        debug_log.append("🤔 No previously traded Myriad markets found in the bot's log. Nothing to check for positions.")
+        return pd.DataFrame(), debug_log
+        
+    debug_log.append(f"🔎 Found {len(traded_markets)} traded market(s) to check: {[m['slug'] for m in traded_markets]}")
     positions = []
     
     for market in traded_markets:
+        market_id = market.get('id')
+        market_slug = market.get('slug', 'N/A')
+        debug_log.append(f"\n--- Checking market: '{market_slug}' (ID: {market_id}) ---")
         try:
-            market_id = market['id']
+            if not market_id:
+                debug_log.append(f"⚠️ Skipping market '{market_slug}': Market ID is missing from database record.")
+                continue
+
+            # This is the on-chain call
             _liquidity, outcomes = myriad_contract.functions.getUserMarketShares(market_id, user_address).call()
+            debug_log.append(f"✅ On-chain call successful.")
+            debug_log.append(f"   - Raw liquidity returned: {_liquidity}")
+            debug_log.append(f"   - Raw outcomes array returned: {outcomes}")
             
-            # Per user request, shares are scaled by 10^6 and should be integer
+            # Shares are scaled by 1e6. We take the integer part as requested.
             shares_outcome_0 = int(outcomes[0] / 1e6)
             shares_outcome_1 = int(outcomes[1] / 1e6)
+            debug_log.append(f"   - Calculated shares for Outcome 0: {shares_outcome_0} (from raw value {outcomes[0]})")
+            debug_log.append(f"   - Calculated shares for Outcome 1: {shares_outcome_1} (from raw value {outcomes[1]})")
 
             if shares_outcome_0 > 0:
                 positions.append({'Market': market['name'], 'Outcome Index': 0, 'Shares': shares_outcome_0})
+                debug_log.append(f"   => Found {shares_outcome_0} shares for Outcome 0. Adding to positions list.")
             if shares_outcome_1 > 0:
                 positions.append({'Market': market['name'], 'Outcome Index': 1, 'Shares': shares_outcome_1})
+                debug_log.append(f"   => Found {shares_outcome_1} shares for Outcome 1. Adding to positions list.")
+                
         except Exception as e:
-            log.error(f"Failed to get Myriad shares for market {market.get('slug', 'N/A')}: {e}")
+            error_message = f"❌ ERROR checking market '{market_slug}': {e}"
+            debug_log.append(error_message)
+            log.error(f"Failed to get Myriad shares for market {market_slug}: {e}", exc_info=True)
 
-    return pd.DataFrame(positions)
+    debug_log.append("\n--- Finished ---")
+    return pd.DataFrame(positions), debug_log
 
 
 pos_tab1, pos_tab2 = st.tabs(["Polymarket Positions", "Myriad Positions"])
@@ -82,7 +117,7 @@ with pos_tab1:
         with st.spinner("Fetching Polymarket positions..."):
             df_poly_pos = get_poly_positions(POLYMARKET_PROXY_ADDRESS)
             if df_poly_pos.empty:
-                st.info("No open positions found on Polymarket.")
+                st.info("No open positions found on Polymarket with more than 1 share.")
             else:
                 st.dataframe(df_poly_pos, use_container_width=True, hide_index=True, column_config={
                     "Shares": st.column_config.NumberColumn(format="%.2f"),
@@ -96,11 +131,14 @@ with pos_tab2:
         st.warning("`MYRIAD_PRIVATE_KEY` not set in .env file.")
     else:
         with st.spinner("Fetching Myriad positions from on-chain data..."):
-            df_myriad_pos = get_myriad_positions(myriad_account.address)
+            df_myriad_pos, myriad_debug_log = get_myriad_positions(myriad_account.address)
             if df_myriad_pos.empty:
-                st.info("No open positions found on Myriad for traded markets.")
+                st.info("No open positions found on Myriad for any markets the bot has traded.")
             else:
                 st.dataframe(df_myriad_pos, use_container_width=True, hide_index=True)
+            
+            with st.expander("Show Myriad Position Fetch Log"):
+                st.code("\n".join(myriad_debug_log), language="log")
 
 st.markdown("---")
 
