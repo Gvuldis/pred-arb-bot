@@ -1,5 +1,3 @@
-if total_revenue > (shares_to_sell * 1.03) and total_revenue > min_shares:
-
 import logging
 import uuid
 import json
