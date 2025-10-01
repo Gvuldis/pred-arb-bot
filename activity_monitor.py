@@ -1,7 +1,9 @@
+# activity_monitor.py
 import os
 import requests
 import time
 import logging
+from collections import deque
 from notifications.discord import DiscordNotifier
 
 # --- Configuration ---
@@ -16,6 +18,11 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # How often to check the API, in seconds
 POLL_INTERVAL_SECONDS = 20
+
+# --- MEMORY LEAK FIX: Capped Recent Hashes ---
+# We will only store the last 2000 transaction hashes. This is more than enough
+# to prevent duplicate alerts from recent activity and completely stops memory growth.
+MAX_SEEN_HASHES = 2000
 
 # --- Initialization ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -32,11 +39,12 @@ def monitor_bodega_activity():
         log.error("Missing DISCORD_WEBHOOK_URL. Exiting.")
         return
 
-    # A set to keep track of transaction hashes we've already sent notifications for.
-    # This is the key to preventing duplicate alerts.
-    seen_tx_hashes = set()
+    # A deque with a max length acts as a "rolling" set. When it's full,
+    # adding a new item automatically discards the oldest one. This is the fix.
+    seen_tx_hashes = deque(maxlen=MAX_SEEN_HASHES)
 
     log.info(f"Starting Bodega activity monitor. Alerting on trades > {LARGE_TRADE_THRESHOLD_SHARES} shares.")
+    log.info(f"Memory management is active: keeping the last {MAX_SEEN_HASHES} transaction hashes.")
 
     while True:
         try:
@@ -63,7 +71,6 @@ def monitor_bodega_activity():
                     # Construct the alert message for Discord
                     market_id = trade.get('id')
                     side = trade.get('side')
-                    address = trade.get('address')
                     
                     # Create a clickable link to the transaction on Cardanoscan
                     tx_url = f"https://cardanoscan.io/transaction/{tx_hash}"
@@ -78,20 +85,13 @@ def monitor_bodega_activity():
                     
                     notifier.send(message)
 
-                # Add the hash to our set regardless of size to mark it as processed
-                seen_tx_hashes.add(tx_hash)
+                # Add the hash to our deque. If it's full, the oldest hash is dropped.
+                seen_tx_hashes.append(tx_hash)
 
         except requests.exceptions.RequestException as e:
             log.error(f"Error connecting to Bodega API: {e}")
         except Exception as e:
             log.error(f"An unexpected error occurred: {e}", exc_info=True)
-
-        # Simple memory management: clear the set if it gets too big
-        if len(seen_tx_hashes) > 5000:
-            log.info("Clearing old transaction hash cache.")
-            # Keep the last 100 hashes to prevent recent duplicates after clearing
-            last_100 = list(seen_tx_hashes)[-100:]
-            seen_tx_hashes = set(last_100)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 

@@ -1,4 +1,3 @@
-# services/polymarket/model.py
 import math
 import logging
 from scipy.special import logsumexp
