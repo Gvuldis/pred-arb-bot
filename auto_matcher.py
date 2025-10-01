@@ -24,17 +24,25 @@ from services.myriad.model import build_arbitrage_table_myriad, calculate_sell_r
 import services.myriad.model as myriad_model
 
 # --- POSITION TRACKING HELPERS ---
-def get_myriad_positions() -> dict:
-    """ Fetches current Myriad positions for all manually matched markets. """
+def get_myriad_positions(myriad_market_map: dict) -> dict:
+    """ 
+    Fetches current Myriad positions for all manually matched markets.
+    OPTIMIZED: This function no longer makes API calls. It uses the pre-fetched
+    market data map to find market IDs.
+    """
     if not myriad_account or not myriad_contract:
         log.warning("Myriad account or contract not available for position check.")
         return {}
     
     positions = {}
-    matched_markets = load_manual_pairs_myriad()
-    market_ids = {m_data['id'] for m_slug in {p[0] for p in matched_markets} if (m_data := m_client.fetch_market_details(m_slug))}
+    manual_pairs = load_manual_pairs_myriad()
+    
+    # Create a simple lookup map of slug -> market_id from the pre-fetched data.
+    slug_to_id_map = {slug: data.get('id') for slug, data in myriad_market_map.items() if data.get('id')}
 
-    for market_id in market_ids:
+    market_ids_to_check = {slug_to_id_map.get(pair[0]) for pair in manual_pairs if slug_to_id_map.get(pair[0])}
+
+    for market_id in market_ids_to_check:
         try:
             _liquidity, outcomes = myriad_contract.functions.getUserMarketShares(market_id, myriad_account.address).call()
             # Shares are scaled by 1e6
@@ -45,6 +53,7 @@ def get_myriad_positions() -> dict:
         except Exception as e:
             log.error(f"Failed to get Myriad shares for market {market_id}: {e}")
     return positions
+
 
 def get_poly_positions() -> dict:
     """ Fetches current Polymarket positions from the data API. """
@@ -201,12 +210,7 @@ def run_myriad_arb_check():
             log.info("No manual Myriad pairs to check. Skipping.")
             return
 
-        # Fetch current positions once before checking all pairs
-        myriad_positions = get_myriad_positions()
-        poly_positions = get_poly_positions()
-        log.info(f"Found {len(myriad_positions)} Myriad market positions and {len(poly_positions)} Polymarket market positions.")
-
-        # --- OPTIMIZATION: Pre-fetch all Myriad market data to reduce API calls in the loop ---
+        # --- OPTIMIZATION: Pre-fetch all Myriad market data once to reduce API calls ---
         try:
             all_myriad_markets = m_client.fetch_markets()
             myriad_market_map = {m['slug']: m for m in all_myriad_markets}
@@ -214,6 +218,12 @@ def run_myriad_arb_check():
         except Exception as e:
             log.error(f"Failed to pre-fetch Myriad markets for arb check: {e}. Aborting.")
             return
+
+        # Fetch current positions once, using the pre-fetched market data to avoid new API calls.
+        myriad_positions = get_myriad_positions(myriad_market_map)
+        poly_positions = get_poly_positions()
+        log.info(f"Found {len(myriad_positions)} Myriad market positions and {len(poly_positions)} Polymarket market positions.")
+
 
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs:
@@ -236,36 +246,27 @@ def run_myriad_arb_check():
                     log.info(f"Positions found for pair ({m_slug}, {p_id}). Checking for early exit.")
                     p_data_sell = p_client.fetch_market(p_id)
                     
-                    # Determine which outcomes are paired based on the flip flag
-                    # An arb position consists of opposing outcomes
-                    # Position 1: Myriad Outcome 0 (YES-like) vs Poly Outcome NO-like
-                    # Position 2: Myriad Outcome 1 (NO-like) vs Poly Outcome YES-like
-                    
                     myr_s0, myr_s1 = myr_pos.get(0, 0), myr_pos.get(1, 0)
                     poly_s_yes, poly_s_no = poly_pos.get(p_data_sell['outcome_yes'], 0), poly_pos.get(p_data_sell['outcome_no'], 0)
                     
                     paired_position = None
                     if is_flipped:
-                        # Myriad 0 <-> Poly NO, Myriad 1 <-> Poly YES
                         if myr_s0 > 0 and poly_s_yes > 0: paired_position = {'myr_outcome': 0, 'myr_shares': myr_s0, 'poly_outcome_name': p_data_sell['outcome_yes'], 'poly_shares': poly_s_yes, 'poly_token': p_data_sell['token_id_yes'], 'poly_book': p_data_sell['order_book_yes_bids']}
                         if myr_s1 > 0 and poly_s_no > 0: paired_position = {'myr_outcome': 1, 'myr_shares': myr_s1, 'poly_outcome_name': p_data_sell['outcome_no'], 'poly_shares': poly_s_no, 'poly_token': p_data_sell['token_id_no'], 'poly_book': p_data_sell['order_book_no_bids']}
                     else:
-                        # Myriad 0 <-> Poly YES, Myriad 1 <-> Poly NO
                         if myr_s0 > 0 and poly_s_no > 0: paired_position = {'myr_outcome': 0, 'myr_shares': myr_s0, 'poly_outcome_name': p_data_sell['outcome_no'], 'poly_shares': poly_s_no, 'poly_token': p_data_sell['token_id_no'], 'poly_book': p_data_sell['order_book_no_bids']}
                         if myr_s1 > 0 and poly_s_yes > 0: paired_position = {'myr_outcome': 1, 'myr_shares': myr_s1, 'poly_outcome_name': p_data_sell['outcome_yes'], 'poly_shares': poly_s_yes, 'poly_token': p_data_sell['token_id_yes'], 'poly_book': p_data_sell['order_book_yes_bids']}
 
                     if paired_position:
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
-                        shares_to_sell = min(min_shares, 10.0) # Test limit of 10 shares
+                        shares_to_sell = min(min_shares, 10.0)
                         
                         m_prices = m_client.parse_realtime_prices(m_data)
+                        if not m_prices: continue # Skip if prices can't be parsed
+                        
                         q1, q2, b = m_prices['shares1'], m_prices['shares2'], m_prices['liquidity']
                         
-                        myr_revenue = 0
-                        if paired_position['myr_outcome'] == 0:
-                            myr_revenue = calculate_sell_revenue(q1, q2, b, shares_to_sell)
-                        else: # outcome 1
-                            myr_revenue = calculate_sell_revenue(q2, q1, b, shares_to_sell)
+                        myr_revenue = calculate_sell_revenue(q1, q2, b, shares_to_sell) if paired_position['myr_outcome'] == 0 else calculate_sell_revenue(q2, q1, b, shares_to_sell)
                         
                         _f, poly_revenue, _p = consume_order_book(paired_position['poly_book'], shares_to_sell)
                         total_revenue = myr_revenue + poly_revenue
@@ -274,22 +275,11 @@ def run_myriad_arb_check():
 
                         if total_revenue > (shares_to_sell * 1.03) and total_revenue > min_shares:
                             log.warning(f"Found profitable early exit for {m_slug}! Total revenue for {shares_to_sell} shares is ${total_revenue:.2f}.")
-                            # Queue sell opportunity
                             sell_opp = {
                                 "type": "sell", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                "market_identifiers": {
-                                    "myriad_slug": m_slug, "myriad_market_id": myriad_market_id,
-                                    "polymarket_condition_id": p_id,
-                                    "polymarket_token_id_sell": paired_position['poly_token'],
-                                },
+                                "market_identifiers": {"myriad_slug": m_slug, "myriad_market_id": myriad_market_id, "polymarket_condition_id": p_id, "polymarket_token_id_sell": paired_position['poly_token']},
                                 "market_details": {"myriad_title": m_data.get('title')},
-                                "trade_plan": {
-                                    "myriad_outcome_id_sell": paired_position['myr_outcome'],
-                                    "myriad_shares_to_sell": shares_to_sell,
-                                    "myriad_min_usd_receive": myr_revenue * 0.99, # 1% slippage
-                                    "polymarket_shares_to_sell": shares_to_sell,
-                                    "polymarket_limit_price": paired_position['poly_book'][0][0] if paired_position['poly_book'] else 0.01,
-                                },
+                                "trade_plan": {"myriad_outcome_id_sell": paired_position['myr_outcome'], "myriad_shares_to_sell": shares_to_sell, "myriad_min_usd_receive": myr_revenue * 0.99, "polymarket_shares_to_sell": shares_to_sell, "polymarket_limit_price": paired_position['poly_book'][0][0] if paired_position['poly_book'] else 0.01},
                                 "profitability_metrics": {"estimated_profit_usd": total_revenue - shares_to_sell}
                             }
                             add_arb_opportunity(sell_opp)
@@ -338,32 +328,17 @@ def run_myriad_arb_check():
                 if is_flipped:
                     order_book_poly_1, order_book_poly_2 = order_book_poly_2, order_book_poly_1
                 
-                pair_opportunities = build_arbitrage_table_myriad(
-                    Q1, Q2, order_book_poly_1, order_book_poly_2, 
-                    FEE_RATE_MYRIAD_BUY, B_param,
-                    P1_MYR_REALTIME=m_prices['price1']
-                )
+                pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, FEE_RATE_MYRIAD_BUY, B_param, P1_MYR_REALTIME=m_prices['price1'])
 
                 for summary in pair_opportunities:
                     summary['apy'] = calculate_apy(summary.get('roi', 0), final_end_date_ms)
                     
                     if is_flipped:
-                        current_poly_side = summary['polymarket_side']
-                        summary['polymarket_side'] = 2 if current_poly_side == 1 else 1
+                        summary['polymarket_side'] = 2 if summary['polymarket_side'] == 1 else 1
 
-                    if summary.get("profit_usd", 0) > profit_threshold and \
-                       summary.get("roi", 0) > 0.05 and \
-                       summary.get("apy", 0) >= 5:
-                        
-                        # Add current prices to summary for enhanced notifications
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05 and summary.get("apy", 0) >= 5:
                         summary['myriad_current_price'] = m_prices['price1'] if summary['myriad_side'] == 1 else m_prices['price2']
-                        if summary['polymarket_side'] == 1 and order_book_poly_1:
-                            summary['poly_current_price'] = order_book_poly_1[0][0]
-                        elif summary['polymarket_side'] == 2 and order_book_poly_2:
-                            summary['poly_current_price'] = order_book_poly_2[0][0]
-                        else:
-                            summary['poly_current_price'] = None
-
+                        summary['poly_current_price'] = (order_book_poly_1[0][0] if summary['polymarket_side'] == 1 and order_book_poly_1 else (order_book_poly_2[0][0] if summary['polymarket_side'] == 2 and order_book_poly_2 else None))
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
                         pair_desc = f"{m_data['title']} <-> {p_data['question']}"
@@ -371,56 +346,20 @@ def run_myriad_arb_check():
 
                         if is_autotrade_safe:
                             try:
-                                polymarket_token_id_buy = None
-                                polymarket_limit_price = None
-                                if summary['polymarket_side'] == 1 and p_data.get('order_book_yes'):
-                                    polymarket_token_id_buy = p_data.get('token_id_yes')
-                                    polymarket_limit_price = p_data['order_book_yes'][0][0]
-                                elif summary['polymarket_side'] == 2 and p_data.get('order_book_no'):
-                                    polymarket_token_id_buy = p_data.get('token_id_no')
-                                    polymarket_limit_price = p_data['order_book_no'][0][0]
+                                polymarket_token_id_buy = (p_data.get('token_id_yes') if summary['polymarket_side'] == 1 and p_data.get('order_book_yes') else (p_data.get('token_id_no') if summary['polymarket_side'] == 2 and p_data.get('order_book_no') else None))
+                                polymarket_limit_price = (p_data['order_book_yes'][0][0] if summary['polymarket_side'] == 1 and p_data.get('order_book_yes') else (p_data['order_book_no'][0][0] if summary['polymarket_side'] == 2 and p_data.get('order_book_no') else None))
 
                                 if not polymarket_token_id_buy or not polymarket_limit_price:
                                     log.warning(f"Could not determine Polymarket token ID or limit price for autotrade on {m_slug}. Skipping queue.")
                                     continue
 
                                 opportunity_message = {
-                                    "type": "buy", # Explicitly set type
-                                    "opportunity_id": str(uuid.uuid4()),
-                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                    "platform": "Myriad",
-                                    "market_identifiers": {
-                                        "myriad_slug": m_slug,
-                                        "myriad_market_id": m_data.get('id'),
-                                        "polymarket_condition_id": p_id,
-                                        "polymarket_token_id_buy": polymarket_token_id_buy,
-                                        "is_flipped": bool(is_flipped)
-                                    },
-                                    "market_details": {
-                                        "myriad_title": m_data.get('title'),
-                                        "polymarket_question": p_data.get('question'),
-                                        "market_expiry_utc": market_expiry_utc
-                                    },
-                                    "trade_plan": {
-                                        "direction": summary.get('direction'),
-                                        "myriad_side_to_buy": summary.get('myriad_side'),
-                                        "polymarket_side_to_buy": summary.get('polymarket_side'),
-                                        "myriad_shares_to_buy": summary.get('myriad_shares'),
-                                        "estimated_myriad_cost_usd": summary.get('cost_myr_usd'),
-                                        "polymarket_shares_to_buy": summary.get('polymarket_shares'),
-                                        "polymarket_limit_price": polymarket_limit_price,
-                                        "estimated_polymarket_cost_usd": summary.get('cost_poly_usd')
-                                    },
-                                    "profitability_metrics": {
-                                        "estimated_profit_usd": summary.get('profit_usd'),
-                                        "roi": summary.get('roi'),
-                                        "apy": summary.get('apy')
-                                    },
-                                    "amm_parameters": {
-                                        "myriad_q1": Q1,
-                                        "myriad_q2": Q2,
-                                        "myriad_liquidity": B_param
-                                    }
+                                    "type": "buy", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(), "platform": "Myriad",
+                                    "market_identifiers": {"myriad_slug": m_slug, "myriad_market_id": m_data.get('id'), "polymarket_condition_id": p_id, "polymarket_token_id_buy": polymarket_token_id_buy, "is_flipped": bool(is_flipped)},
+                                    "market_details": {"myriad_title": m_data.get('title'), "polymarket_question": p_data.get('question'), "market_expiry_utc": market_expiry_utc},
+                                    "trade_plan": {"direction": summary.get('direction'), "myriad_side_to_buy": summary.get('myriad_side'), "polymarket_side_to_buy": summary.get('polymarket_side'), "myriad_shares_to_buy": summary.get('myriad_shares'), "estimated_myriad_cost_usd": summary.get('cost_myr_usd'), "polymarket_shares_to_buy": summary.get('polymarket_shares'), "polymarket_limit_price": polymarket_limit_price, "estimated_polymarket_cost_usd": summary.get('cost_poly_usd')},
+                                    "profitability_metrics": {"estimated_profit_usd": summary.get('profit_usd'), "roi": summary.get('roi'), "apy": summary.get('apy')},
+                                    "amm_parameters": {"myriad_q1": Q1, "myriad_q2": Q2, "myriad_liquidity": B_param}
                                 }
                                 add_arb_opportunity(opportunity_message)
                             except Exception as e:
