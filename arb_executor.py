@@ -327,15 +327,11 @@ def process_sell_opportunity(opp: dict):
         if get_abstract_eth_balance() < MIN_ETH_BALANCE: raise ValueError(f"Insufficient gas on Myriad for sell.")
         last_trade_ts = db.get_market_cooldown(market_key)
         if last_trade_ts and datetime.now(timezone.utc) < (datetime.fromisoformat(last_trade_ts) + timedelta(minutes=TRADE_COOLDOWN_MINUTES)): raise ValueError(f"Market is on sell cooldown.")
-
-        # Re-verify profitability before executing
+        
         m_data = m_client.fetch_market_details(myriad_slug)
         p_data = p_client.fetch_market(poly_id)
         if not m_data or m_data.get('state') != 'open' or not p_data or not p_data.get('active'):
             raise ValueError("One of the markets is no longer active.")
-        
-        # This re-verification is complex, for now we trust the opportunity from the matcher
-        # as it runs very frequently. A full re-calc would need position data again.
         log.info("✅ All Pre-flight checks for SELL passed.")
 
         # STEP 2: EXECUTE SELLS
@@ -344,8 +340,10 @@ def process_sell_opportunity(opp: dict):
 
         # LEG 1: POLYMARKET SELL
         log.info(f"--- Executing Leg 1 (Polymarket SELL) ---")
+        existing_trade_ids = {t['id'] for t in clob_client.get_trades()} if EXECUTION_MODE != "DRY_RUN" else set()
+        
         if EXECUTION_MODE == "DRY_RUN":
-            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_sell'])}}
+            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_sell']), 'makingAmount': str(plan['polymarket_shares_to_sell'] * plan['polymarket_limit_price'])}}
         else:
             poly_result = execute_polymarket_sell(
                 opp['market_identifiers']['polymarket_token_id_sell'],
@@ -354,41 +352,87 @@ def process_sell_opportunity(opp: dict):
             )
         if not poly_result.get('success'):
             raise RuntimeError(f"Failed Leg 1 (Poly SELL): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")
-        log.info(f"✅ Leg 1 (Poly SELL) SUCCESS.")
+
+        fak_response = poly_result.get('response', {})
+        executed_poly_shares_sold, executed_poly_revenue_usd = 0.0, 0.0
+        trade_info_json = json.dumps(fak_response)
+        order_id = fak_response.get('orderID')
+
+        if EXECUTION_MODE != "DRY_RUN" and order_id:
+            log.info(f"[POLY] Sell Order {order_id} submitted (status: {fak_response.get('status')}). Waiting 5s for trade details...")
+            time.sleep(5)
+            all_my_trades_after = clob_client.get_trades()
+            db.save_poly_trades(all_my_trades_after)
+            new_trades = [t for t in all_my_trades_after if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id]
+            if new_trades:
+                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for order {order_id}")
+                for trade in new_trades:
+                    for mo in trade.get('maker_orders', []):
+                        matched_amount = float(mo.get('matched_amount', '0'))
+                        price = float(mo.get('price', '0'))
+                        executed_poly_shares_sold += matched_amount
+                        executed_poly_revenue_usd += matched_amount * price
+                trade_info_json = json.dumps(new_trades)
+            else:
+                log.error(f"[POLY] CRITICAL: Could not find trade details for sell order {order_id}.")
+        else:
+            executed_poly_shares_sold = float(fak_response.get('takingAmount', '0'))
+            executed_poly_revenue_usd = float(fak_response.get('makingAmount', '0'))
+            if executed_poly_revenue_usd == 0 and executed_poly_shares_sold > 0:
+                executed_poly_revenue_usd = executed_poly_shares_sold * plan['polymarket_limit_price']
+
+        if executed_poly_shares_sold <= 0:
+            raise RuntimeError("Leg 1 (Poly SELL) executed, but no shares were sold.")
+        log.info(f"✅ Leg 1 (Poly SELL) SUCCESS: Sold {executed_poly_shares_sold:.4f} shares for ${executed_poly_revenue_usd:.4f} on Polymarket.")
+        trade_log.update({'executed_poly_shares': executed_poly_shares_sold, 'executed_poly_cost_usd': -executed_poly_revenue_usd, 'poly_tx_hash': trade_info_json})
 
         # LEG 2: MYRIAD SELL
         log.info(f"--- Executing Leg 2 (Myriad SELL) ---")
+        final_myriad_shares_to_sell = executed_poly_shares_sold
+        final_min_usdc_receive, recalculated_myr_revenue = 0.0, 0.0
+
+        if 'amm_parameters' in opp:
+            amm = opp['amm_parameters']
+            q1, q2, b = amm['myriad_q1'], amm['myriad_q2'], amm['myriad_liquidity']
+            myriad_outcome_id_sell = plan['myriad_outcome_id_sell']
+            q_sell, q_other = (q1, q2) if myriad_outcome_id_sell == 0 else (q2, q1)
+            recalculated_myr_revenue = myriad_model.calculate_sell_revenue(q_sell, q_other, b, final_myriad_shares_to_sell)
+            final_min_usdc_receive = recalculated_myr_revenue * 0.99
+            log.info(f"[MYRIAD] Recalculated minimum USDC receive for {final_myriad_shares_to_sell:.4f} shares: ${final_min_usdc_receive:.4f}")
+        else:
+            original_shares = plan['myriad_shares_to_sell']
+            original_min_usd = plan['myriad_min_usd_receive']
+            if original_shares > 0:
+                scaling_factor = final_myriad_shares_to_sell / original_shares
+                final_min_usdc_receive = original_min_usd * scaling_factor
+                recalculated_myr_revenue = final_min_usdc_receive / 0.99
+                log.warning(f"[MYRIAD] amm_parameters missing. Using linear scaling for min USDC receive: ${final_min_usdc_receive:.4f}")
+            else:
+                raise RuntimeError("Cannot determine min USDC receive for Myriad sell.")
+        
         if EXECUTION_MODE == "DRY_RUN":
             myriad_result = {'success': True, 'tx_hash': 'dry_run_hash_sell'}
         else:
-            myriad_result = execute_myriad_sell(
-                opp['market_identifiers']['myriad_market_id'],
-                plan['myriad_outcome_id_sell'],
-                plan['myriad_shares_to_sell'],
-                plan['myriad_min_usd_receive']
-            )
+            myriad_result = execute_myriad_sell(opp['market_identifiers']['myriad_market_id'], plan['myriad_outcome_id_sell'], final_myriad_shares_to_sell, final_min_usdc_receive)
         if not myriad_result.get('success'):
-            # This is a critical failure - we sold on Poly but not Myriad.
-            # We are now unhedged. A real implementation might try to buy back. For now, CRITICAL ALERT.
             raise RuntimeError(f"Failed Leg 2 (Myriad SELL): {myriad_result.get('error')}")
 
         log.info("✅ Both SELL legs executed successfully!")
-        trade_log.update({
-            'status': 'SUCCESS_SELL', 
-            'status_message': 'Both sell legs executed.', 
-            'poly_tx_hash': json.dumps(poly_result.get('response', {})),
-            'myriad_tx_hash': myriad_result.get('tx_hash'),
-            'final_profit_usd': opp['profitability_metrics']['estimated_profit_usd']
-        })
+        final_profit = (executed_poly_revenue_usd + recalculated_myr_revenue) - executed_poly_shares_sold
+        trade_log.update({ 'status': 'SUCCESS_SELL', 'status_message': 'Both sell legs executed.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': final_profit })
         db.log_trade_attempt(trade_log)
+        if EXECUTION_MODE != "DRY_RUN" and notifier: notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], executed_poly_shares_sold, 0, 0, trade_type="SELL")
 
-        if EXECUTION_MODE != "DRY_RUN" and notifier:
-            notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], plan['polymarket_shares_to_sell'], 0, 0, trade_type="SELL")
     except (ValueError, RuntimeError) as e:
         log.error(f"SELL trade failed for {trade_id}: {e}")
-        # <<< FIX: REMOVED THE LINE BELOW >>>
-        # db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        status = 'FAIL_PREFLIGHT_SELL' if 'Leg 1' not in str(e) and 'Leg 2' not in str(e) else 'FAIL_LEG1_SELL' if 'Leg 1' in str(e) else 'FAIL_LEG2_SELL'
+        
+        if status != 'FAIL_PREFLIGHT_SELL':
+            trade_log.update({'status': status, 'status_message': str(e)})
+            db.log_trade_attempt(trade_log)
+
         if notifier: notifier.notify_autotrade_failure(market_title, str(e), "FAIL_SELL")
+        
         if 'Leg 2' in str(e): # Critical failure after selling on one leg
             log.critical(f"!!!!!! SELL PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
             if notifier: notifier.notify_autotrade_panic(market_title, str(e), trade_type="SELL")

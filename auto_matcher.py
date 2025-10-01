@@ -272,7 +272,6 @@ def run_myriad_arb_check():
                         
                         log.info(f"[SELL CHECK] Pair ({m_slug}, {p_id}): min_shares={min_shares:.2f}, shares_to_sell={shares_to_sell:.2f}, Myriad revenue=${myr_revenue:.2f}, Poly revenue=${poly_revenue:.2f}, Total=${total_revenue:.2f}")
 
-                        # --- FIX: Removed the buggy `total_revenue > min_shares` condition ---
                         if total_revenue > (shares_to_sell * 1.03):
                             log.warning(f"Found profitable early exit for {m_slug}! Total revenue for {shares_to_sell} shares is ${total_revenue:.2f}.")
                             sell_opp = {
@@ -280,11 +279,10 @@ def run_myriad_arb_check():
                                 "market_identifiers": {"myriad_slug": m_slug, "myriad_market_id": myriad_market_id, "polymarket_condition_id": p_id, "polymarket_token_id_sell": paired_position['poly_token']},
                                 "market_details": {"myriad_title": m_data.get('title')},
                                 "trade_plan": {"myriad_outcome_id_sell": paired_position['myr_outcome'], "myriad_shares_to_sell": shares_to_sell, "myriad_min_usd_receive": myr_revenue * 0.99, "polymarket_shares_to_sell": shares_to_sell, "polymarket_limit_price": paired_position['poly_book'][0][0] if paired_position['poly_book'] else 0.01},
-                                "profitability_metrics": {"estimated_profit_usd": total_revenue - shares_to_sell}
+                                "profitability_metrics": {"estimated_profit_usd": total_revenue - shares_to_sell},
+                                "amm_parameters": {"myriad_q1": q1, "myriad_q2": q2, "myriad_liquidity": b}
                             }
                             add_arb_opportunity(sell_opp)
-                            # <<< FIX: REMOVED THE LINE BELOW >>>
-                            # update_market_cooldown(f"myriad_{m_slug}_sell", datetime.now(timezone.utc).isoformat())
 
                 # ==========================================================
                 # 2. ARBITRAGE (BUY) CHECK
