@@ -1,4 +1,3 @@
-# arb_executor.py
 import os
 import math
 import logging
@@ -387,7 +386,8 @@ def process_sell_opportunity(opp: dict):
             notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], plan['polymarket_shares_to_sell'], 0, 0, trade_type="SELL")
     except (ValueError, RuntimeError) as e:
         log.error(f"SELL trade failed for {trade_id}: {e}")
-        db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        # <<< FIX: REMOVED THE LINE BELOW >>>
+        # db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
         if notifier: notifier.notify_autotrade_failure(market_title, str(e), "FAIL_SELL")
         if 'Leg 2' in str(e): # Critical failure after selling on one leg
             log.critical(f"!!!!!! SELL PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
@@ -522,7 +522,8 @@ def process_opportunity(opp: dict):
 
     except (ValueError, RuntimeError) as e:
         log.error(f"Trade failed for {trade_id}: {e}")
-        db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
+        # <<< FIX: REMOVED THE LINE BELOW >>>
+        # db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
         status = 'FAIL_PREFLIGHT' if 'Leg 1' not in str(e) and 'Leg 2' not in str(e) else 'FAIL_LEG1_EXECUTION' if 'Leg 1' in str(e) else 'FAIL_LEG2_EXECUTION'
         
         # Only log and notify for actual execution failures, not pre-flight checks

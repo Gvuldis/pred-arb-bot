@@ -283,7 +283,8 @@ def run_myriad_arb_check():
                                 "profitability_metrics": {"estimated_profit_usd": total_revenue - shares_to_sell}
                             }
                             add_arb_opportunity(sell_opp)
-                            update_market_cooldown(f"myriad_{m_slug}_sell", datetime.now(timezone.utc).isoformat())
+                            # <<< FIX: REMOVED THE LINE BELOW >>>
+                            # update_market_cooldown(f"myriad_{m_slug}_sell", datetime.now(timezone.utc).isoformat())
 
                 # ==========================================================
                 # 2. ARBITRAGE (BUY) CHECK
