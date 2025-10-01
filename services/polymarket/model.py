@@ -1,3 +1,4 @@
+# services/polymarket/model.py
 import math
 import logging
 from scipy.special import logsumexp
@@ -188,59 +189,37 @@ def _calculate_trade_outcome_fixed_shares(
         "p_end": compute_price(q1_bod + x_bod, q2_bod, b)
     }
 
-def _iterative_search(calculation_func, **kwargs):
+def _iterative_search(calculation_func, **kwargs) -> Optional[Dict]:
     """
-    Performs a three-stage iterative search for the best trade outcome.
+    Performs a memory-efficient search for the best trade outcome.
+    Only tracks the best result found so far, instead of storing all results.
     """
-    all_outcomes = []
+    best_outcome = None
     
+    def update_best(outcome):
+        nonlocal best_outcome
+        if outcome:
+            if best_outcome is None or outcome.get('score', -1e9) > best_outcome.get('score', -1e9):
+                best_outcome = outcome
+
     # Stage 1: Coarse search
     coarse_adjustments = [i / 100.0 for i in range(0, 51)] # 0.00 to 0.50, step 0.01
     for adj in coarse_adjustments:
         outcome = calculation_func(target_adjustment=adj, **kwargs)
-        if outcome:
-            all_outcomes.append(outcome)
-            
-    if not all_outcomes:
-        return None, []
+        update_best(outcome)
 
-    best_coarse = max(all_outcomes, key=lambda x: x.get('score', -1e9))
-    
-    # Stage 2: Fine search
-    if best_coarse.get('score', -1) > 0:
-        best_adj_coarse = best_coarse['adjustment']
+    # Stage 2: Fine search around the best coarse result
+    if best_outcome and best_outcome.get('score', -1) > 0:
+        best_adj_coarse = best_outcome['adjustment']
         fine_start = max(0, best_adj_coarse - 0.01)
-        # Generate 21 steps of 0.001 around the best coarse adjustment
         fine_adjustments = [fine_start + i * 0.001 for i in range(21)]
         
         for adj in fine_adjustments:
             outcome = calculation_func(target_adjustment=adj, **kwargs)
-            if outcome:
-                all_outcomes.append(outcome)
+            update_best(outcome)
 
-    if not all_outcomes:
-        return None, []
-        
-    best_fine = max(all_outcomes, key=lambda x: x.get('score', -1e9))
+    return best_outcome
 
-    # Stage 3: Super-fine search
-    if best_fine.get('score', -1) > 0:
-        best_adj_fine = best_fine['adjustment']
-        super_fine_start = max(0, best_adj_fine - 0.001)
-        # Generate 21 steps of 0.0001 around the best fine adjustment
-        super_fine_adjustments = [super_fine_start + i * 0.0001 for i in range(21)]
-
-        for adj in super_fine_adjustments:
-            outcome = calculation_func(target_adjustment=adj, **kwargs)
-            if outcome:
-                all_outcomes.append(outcome)
-
-    if not all_outcomes:
-        return None, []
-
-    best_overall = max(all_outcomes, key=lambda x: x.get('score', -1e9))
-    
-    return best_overall, all_outcomes
 
 # --- Main function ---
 def build_arbitrage_table(
@@ -281,11 +260,9 @@ def build_arbitrage_table(
             'fee_rate': FEE_RATE, 'initial_cost_bod_ada': initial_cost_bod_ada
         }
 
-        best_outcome, all_s1_outcomes = _iterative_search(calculate_scenario_1, **common_args)
+        best_outcome = _iterative_search(calculate_scenario_1, **common_args)
         
         final_outcome = None
-        analysis_details = sorted(all_s1_outcomes, key=lambda x: x.get('adjustment')) if all_s1_outcomes else []
-
         if best_outcome and best_outcome['profit_usd'] > 0:
             log.info(f"--> Best for BUY YES Bodega is at adjustment {best_outcome['adjustment']:.4f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
             final_outcome = best_outcome
@@ -307,7 +284,6 @@ def build_arbitrage_table(
                 "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
             }
             opp.update(final_outcome)
-            opp['analysis_details'] = analysis_details
             all_opportunities.append(opp)
 
     # --- Scenario 2: Buy NO on Bodega, hedge with YES on Polymarket ---
@@ -331,11 +307,9 @@ def build_arbitrage_table(
             'fee_rate': FEE_RATE, 'initial_cost_bod_ada': initial_cost_bod_ada
         }
         
-        best_outcome, all_s2_outcomes = _iterative_search(calculate_scenario_2, **common_args_s2)
+        best_outcome = _iterative_search(calculate_scenario_2, **common_args_s2)
 
         final_outcome = None
-        analysis_details = sorted(all_s2_outcomes, key=lambda x: x.get('adjustment')) if all_s2_outcomes else []
-
         if best_outcome and best_outcome['profit_usd'] > 0:
             log.info(f"--> Best for BUY NO Bodega is at adjustment {best_outcome['adjustment']:.4f} with profit ${best_outcome['profit_usd']:.2f} and score {best_outcome.get('score',0):.4f}")
             final_outcome = best_outcome
@@ -357,7 +331,6 @@ def build_arbitrage_table(
                 "inferred_B": B, "ada_usd_rate": ADA_TO_USD,
             }
             opp.update(final_outcome)
-            opp['analysis_details'] = analysis_details
             all_opportunities.append(opp)
 
     return all_opportunities

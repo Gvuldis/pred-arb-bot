@@ -546,23 +546,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         st.markdown("##### 2. Polymarket Hedge")
                         st.markdown(f"- **Action:** Buy `{summary['polymarket_shares']}` **{summary['polymarket_side']}** shares\n- **Cost:** `${summary['cost_poly_usd']:.2f}`\n- **Avg. Price:** `{summary.get('avg_poly_price', 0):.4f}`\n- **Hedge Complete:** {'✅' if summary['fill'] else '❌'}")
                     
-                    analysis_data = summary.get('analysis_details', [])
-                    if analysis_data:
-                        with st.expander("Show Detailed Price Adjustment Analysis"):
-                            df_analysis = pd.DataFrame(analysis_data)
-                            df_display = df_analysis[['adjustment', 'p_end', 'bodega_shares', 'profit_usd', 'roi', 'score']].copy()
-                            df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'bodega_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)', 'score': 'Score'}, inplace=True)
-                            df_display['ROI (%)'] = df_display['ROI (%)'] * 100
-                            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={
-                                "Adj": st.column_config.NumberColumn(format="%.4f"), 
-                                "Target Price": st.column_config.NumberColumn(format="%.4f"), 
-                                "Shares": st.column_config.NumberColumn(format="%d"), 
-                                "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), 
-                                "ROI (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                                "Score": st.column_config.NumberColumn(format="%.4f")
-                            })
-                    else:
-                        st.caption("Profit/Loss based on a 1-share trade.")
+                    st.caption("Profit/Loss based on a 1-share trade if no profitable opportunity was found.")
                     st.markdown("---")
             else:
                 st.info("No Bodega arbitrage opportunities found.")
@@ -655,23 +639,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                         st.markdown("##### 2. Polymarket Hedge")
                         st.markdown(f"- **Action:** Buy `{summary['polymarket_shares']}` **{summary['polymarket_side_title']}** shares\n- **Cost:** `${summary['cost_poly_usd']:.2f}`\n- **Avg. Price:** `{summary.get('avg_poly_price', 0):.4f}`\n- **Hedge Complete:** {'✅' if summary['fill'] else '❌'}")
                     
-                    analysis_data = summary.get('analysis_details', [])
-                    if analysis_data:
-                        with st.expander("Show Detailed Price Adjustment Analysis"):
-                            df_analysis = pd.DataFrame(analysis_data)
-                            df_display = df_analysis[['adjustment', 'p_end', 'myriad_shares', 'profit_usd', 'roi', 'score']].copy()
-                            df_display.rename(columns={'adjustment': 'Adj', 'p_end': 'Target Price', 'myriad_shares': 'Shares', 'profit_usd': 'Profit ($)', 'roi': 'ROI (%)', 'score': 'Score'}, inplace=True)
-                            df_display['ROI (%)'] = df_display['ROI (%)'] * 100
-                            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config={
-                                "Adj": st.column_config.NumberColumn(format="%.4f"), 
-                                "Target Price": st.column_config.NumberColumn(format="%.4f"), 
-                                "Shares": st.column_config.NumberColumn(format="%d"), 
-                                "Profit ($)": st.column_config.NumberColumn(format="$%.2f"), 
-                                "ROI (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                                "Score": st.column_config.NumberColumn(format="%.4f")
-                            })
-                    else:
-                        st.caption("Profit/Loss based on a 1-share trade.")
+                    st.caption("Profit/Loss based on a 1-share trade if no profitable opportunity was found.")
                     st.markdown("---")
             else:
                 st.info("No Myriad arbitrage opportunities found.")
