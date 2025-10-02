@@ -109,9 +109,15 @@ def _calculate_trade_outcome(
     comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
     comb_usd = comb_ada * ada_to_usd
     
-    payout_ada = x_bod * 0.98 # 2% redemption fee
-    profit_ada = payout_ada - comb_ada
-    profit_usd = profit_ada * ada_to_usd
+    # --- FIXED PROFIT CALCULATION ---
+    # This logic now correctly calculates profit based on the minimum guaranteed payout
+    # between the two platforms, assuming the markets are true inverses.
+    payout_bod_wins_usd = (x_bod * 0.98) * ada_to_usd # 2% redemption fee
+    payout_poly_wins_usd = filled_poly * 1.0
+    profit_usd = min(payout_bod_wins_usd, payout_poly_wins_usd) - comb_usd
+    profit_ada = profit_usd / ada_to_usd if ada_to_usd > 0 else 0.0
+    # --- END FIX ---
+    
     roi = profit_usd / comb_usd if comb_usd > 0 else 0
     score = profit_usd if profit_usd < 0 else roi * profit_usd
     
@@ -162,9 +168,13 @@ def _calculate_trade_outcome_fixed_shares(
     comb_ada = cost_bod_ada + fee_bod_ada + cost_poly_ada
     comb_usd = comb_ada * ada_to_usd
     
-    payout_ada = x_bod * 0.98 # 2% redemption fee
-    profit_ada = payout_ada - comb_ada
-    profit_usd = profit_ada * ada_to_usd
+    # --- FIXED PROFIT CALCULATION ---
+    payout_bod_wins_usd = (x_bod * 0.98) * ada_to_usd
+    payout_poly_wins_usd = filled_poly * 1.0
+    profit_usd = min(payout_bod_wins_usd, payout_poly_wins_usd) - comb_usd
+    profit_ada = profit_usd / ada_to_usd if ada_to_usd > 0 else 0.0
+    # --- END FIX ---
+
     roi = profit_usd / comb_usd if comb_usd > 0 else 0
     score = profit_usd if profit_usd < 0 else roi * profit_usd
     
