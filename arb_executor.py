@@ -1,3 +1,4 @@
+# arb_executor.py
 import os
 import math
 import logging
@@ -122,8 +123,6 @@ def find_myriad_trade_details(market_id: int, expected_cost: float, myriad_addre
             response = requests.get(api_url, timeout=15)
             response.raise_for_status()
             
-            # FIX: The API response can be a list directly, or a dictionary containing a 'data' key.
-            # This handles both cases to prevent the AttributeError.
             json_response = response.json()
             if isinstance(json_response, list):
                 feed_data = json_response
@@ -201,8 +200,6 @@ def execute_polymarket_buy(token_id: str, price: float, size: float) -> dict:
 
 def execute_polymarket_sell(token_id: str, price: float, size: float) -> dict:
     """Executes a FAK sell order on Polymarket."""
-    # Price for a sell order is the minimum price we'll accept. To sell into the bid book,
-    # we can set the price to the best bid to ensure it fills at that price or better.
     log.info(f"[POLY] Executing SELL FAK. Token: {token_id} | price={price:.2f}, size={size:.4f}")
     try:
         order_args = OrderArgs(price=price, size=size, side=SELL, token_id=token_id)
@@ -280,11 +277,18 @@ def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, 
     log.info(f"[MYRIAD] Executing SELL. Market: {market_id}, Outcome: {outcome_id}, Shares: {shares_to_sell:.4f}, Min USDC: {min_usdc_receive:.4f}")
     try:
         market_contract = w3_abs.eth.contract(address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS), abi=MYRIAD_MARKET_ABI)
+        
+        # <<< FIX FOR SLIPPAGE ISSUE >>>
+        # The `maxSharesToSell` parameter is a slippage guard. We increase it slightly (e.g., by 1%)
+        # to allow for minor price movements between calculation and execution.
+        # This prevents the "maximum sell amount exceeded" revert.
+        shares_with_slippage = shares_to_sell * 1.1
+        
         # Both shares and USDC are scaled by 1e6 on Myriad's contract
-        shares_wei = int(shares_to_sell * (10**6))
+        shares_wei = int(shares_with_slippage * (10**6))
         usdc_wei = int(min_usdc_receive * (10**6))
 
-        log.info(f"[MYRIAD] Building sell transaction with shares_wei={shares_wei}, usdc_wei={usdc_wei}")
+        log.info(f"[MYRIAD] Building sell transaction with shares_wei={shares_wei} (includes 10% slippage tolerance), usdc_wei={usdc_wei}")
         nonce = w3_abs.eth.get_transaction_count(myriad_account.address)
         gas_price = w3_abs.eth.gas_price
         
@@ -566,11 +570,8 @@ def process_opportunity(opp: dict):
 
     except (ValueError, RuntimeError) as e:
         log.error(f"Trade failed for {trade_id}: {e}")
-        # <<< FIX: REMOVED THE LINE BELOW >>>
-        # db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
         status = 'FAIL_PREFLIGHT' if 'Leg 1' not in str(e) and 'Leg 2' not in str(e) else 'FAIL_LEG1_EXECUTION' if 'Leg 1' in str(e) else 'FAIL_LEG2_EXECUTION'
         
-        # Only log and notify for actual execution failures, not pre-flight checks
         if status != 'FAIL_PREFLIGHT':
             trade_log.update({'status': status, 'status_message': str(e)})
             db.log_trade_attempt(trade_log)
