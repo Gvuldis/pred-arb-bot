@@ -61,13 +61,13 @@ def init_db():
         # --- Myriad Tables ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS myriad_markets (
-          id         INTEGER PRIMARY KEY,
-          slug       TEXT UNIQUE,
-          name       TEXT,
-          state      TEXT,
-          expires_at TEXT,
-          fee        REAL,
-          fetched_at INTEGER
+          id               INTEGER PRIMARY KEY,
+          slug             TEXT UNIQUE,
+          name             TEXT,
+          expires_at       TEXT,
+          fee              REAL,
+          full_data_json   TEXT,
+          fetched_at       INTEGER
         )""")
         cur.execute("""
         CREATE TABLE IF NOT EXISTS manual_pairs_myriad (
@@ -187,9 +187,9 @@ def init_db():
         if 'fee' not in columns_myriad_markets:
             log.info("Migration: Adding 'fee' to 'myriad_markets'.")
             cur.execute("ALTER TABLE myriad_markets ADD COLUMN fee REAL")
-        if 'state' not in columns_myriad_markets:
-            log.info("Migration: Adding 'state' to 'myriad_markets'.")
-            cur.execute("ALTER TABLE myriad_markets ADD COLUMN state TEXT")
+        if 'full_data_json' not in columns_myriad_markets:
+            log.info("Migration: Adding 'full_data_json' to 'myriad_markets'.")
+            cur.execute("ALTER TABLE myriad_markets ADD COLUMN full_data_json TEXT")
 
         conn.commit()
         log.info("Database initialization/migration check complete.")
@@ -232,9 +232,9 @@ def ignore_bodega_market(market_id: str):
 # --- Myriad Functions ---
 def save_myriad_markets(markets: list):
     now = int(time.time())
-    data = [(m.get("id"), m.get("slug"), m.get("title"), m.get("state"), m.get("expires_at"), m.get("fee"), now) for m in markets]
+    data = [(m.get("id"), m.get("slug"), m.get("title"), m.get("expires_at"), m.get("fee"), json.dumps(m), now) for m in markets]
     with get_conn() as conn:
-        conn.executemany("INSERT OR REPLACE INTO myriad_markets (id, slug, name, state, expires_at, fee, fetched_at) VALUES (?,?,?,?,?,?,?)", data)
+        conn.executemany("INSERT OR REPLACE INTO myriad_markets (id, slug, name, expires_at, fee, full_data_json, fetched_at) VALUES (?,?,?,?,?,?,?)", data)
         conn.commit()
 
 def load_myriad_markets() -> list:
