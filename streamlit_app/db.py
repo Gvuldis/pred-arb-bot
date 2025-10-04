@@ -1,3 +1,4 @@
+# streamlit_app/db.py
 import sqlite3
 from pathlib import Path
 import time
@@ -64,6 +65,7 @@ def init_db():
           slug       TEXT UNIQUE,
           name       TEXT,
           expires_at TEXT,
+          fee        REAL,
           fetched_at INTEGER
         )""")
         cur.execute("""
@@ -178,6 +180,12 @@ def init_db():
         if 'myriad_api_lookup_status' not in columns_auto_trade:
             log.info("Migration: Adding 'myriad_api_lookup_status' to 'automated_trades_log'.")
             cur.execute("ALTER TABLE automated_trades_log ADD COLUMN myriad_api_lookup_status TEXT DEFAULT 'PENDING'")
+        
+        cur.execute("PRAGMA table_info(myriad_markets)")
+        columns_myriad_markets = [row['name'] for row in cur.fetchall()]
+        if 'fee' not in columns_myriad_markets:
+            log.info("Migration: Adding 'fee' to 'myriad_markets'.")
+            cur.execute("ALTER TABLE myriad_markets ADD COLUMN fee REAL")
 
         conn.commit()
         log.info("Database initialization/migration check complete.")
@@ -220,9 +228,9 @@ def ignore_bodega_market(market_id: str):
 # --- Myriad Functions ---
 def save_myriad_markets(markets: list):
     now = int(time.time())
-    data = [(m.get("id"), m.get("slug"), m.get("title"), m.get("expires_at"), now) for m in markets]
+    data = [(m.get("id"), m.get("slug"), m.get("title"), m.get("expires_at"), m.get("fee"), now) for m in markets]
     with get_conn() as conn:
-        conn.executemany("INSERT OR REPLACE INTO myriad_markets (id, slug, name, expires_at, fetched_at) VALUES (?,?,?,?,?)", data)
+        conn.executemany("INSERT OR REPLACE INTO myriad_markets (id, slug, name, expires_at, fee, fetched_at) VALUES (?,?,?,?,?,?)", data)
         conn.commit()
 
 def load_myriad_markets() -> list:

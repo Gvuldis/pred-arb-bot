@@ -10,7 +10,7 @@ import streamlit as st
 import logging
 from datetime import datetime, timezone, date, time as dt_time
 
-from config import b_client, m_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log
+from config import b_client, m_client, p_client, fx_client, notifier, BODEGA_API, FEE_RATE_BODEGA, log
 from services.polymarket.model import build_arbitrage_table as build_bodega_arb_table, infer_b
 from services.myriad.model import build_arbitrage_table_myriad
 from track_record import portfolio_summary
@@ -571,6 +571,11 @@ if st.button("Check All Manual Pairs for Arbitrage"):
                     elif m_data.get("expires_at"):
                         dt_obj = datetime.fromisoformat(m_data["expires_at"].replace('Z', '+00:00'))
                         final_end_date_ms = int(dt_obj.timestamp() * 1000)
+                    
+                    market_fee = m_data.get('fee')
+                    if market_fee is None:
+                        st.warning(f"Could not retrieve on-chain fee for Myriad market {m_slug}, skipping.")
+                        continue
 
                     m_prices = m_client.parse_realtime_prices(m_data)
                     if not m_prices:
@@ -593,7 +598,7 @@ if st.button("Check All Manual Pairs for Arbitrage"):
 
                     pair_opps = build_arbitrage_table_myriad(
                         Q1, Q2, obp1, obp2, 
-                        FEE_RATE_MYRIAD_BUY, B_param,
+                        market_fee, B_param,
                         P1_MYR_REALTIME=m_prices['price1']
                     )
 

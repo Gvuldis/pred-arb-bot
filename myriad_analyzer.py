@@ -2,6 +2,10 @@
 import requests
 import math
 import logging
+import os
+import json
+from dotenv import load_dotenv
+from web3 import Web3
 from scipy.special import logsumexp
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -9,13 +13,29 @@ from typing import Dict, Any, List, Optional, Tuple
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 
+# Load environment variables to get RPC URL
+load_dotenv()
+ABSTRACT_RPC_URL = os.getenv("ABSTRACT_RPC_URL")
+
 # Base API URL for Myriad/Polkamarkets
 API_BASE_URL = "https://api-production.polkamarkets.com"
 
-# The total fee for a buy transaction is 3% (1% market + 1% treasury + 1% distributor)
-# Sell transactions appear to have 0% fee based on the API response.
-FEE_RATE_BUY = 0.03
-
+# --- Web3 Setup for fee fetching ---
+w3_abs = None
+myriad_contract_interface = None
+if ABSTRACT_RPC_URL:
+    try:
+        w3_abs = Web3(Web3.HTTPProvider(ABSTRACT_RPC_URL))
+        MYRIAD_MARKET_ADDRESS = "0x3e0f5F8F5FB043aBFA475C0308417Bf72c463289"
+        MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"}],"name":"getMarketFee","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]')
+        myriad_contract_interface = w3_abs.eth.contract(
+            address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS),
+            abi=MYRIAD_MARKET_ABI
+        )
+    except Exception as e:
+        log.error(f"Failed to initialize Web3 for fee fetching: {e}")
+        w3_abs = None
+        myriad_contract_interface = None
 
 class MyriadMarketAnalyzer:
     """
@@ -43,6 +63,7 @@ class MyriadMarketAnalyzer:
         self.price1: Optional[float] = None
         self.price2: Optional[float] = None
         self.outcome_titles: Dict[int, str] = {}
+        self.fee: float = 0.03 # Default fee in case fetching fails
         
         # LMSR liquidity parameter from API
         self.b_param: Optional[float] = None
@@ -60,6 +81,7 @@ class MyriadMarketAnalyzer:
             response.raise_for_status()
             self.market_data = response.json()
             log.info("Successfully fetched market data.")
+            self._fetch_onchain_fee()
             return self._parse_data()
         except requests.exceptions.RequestException as e:
             log.error(f"API request failed: {e}")
@@ -67,6 +89,24 @@ class MyriadMarketAnalyzer:
         except (ValueError, KeyError) as e:
             log.error(f"Failed to parse JSON response: {e}")
             return False
+
+    def _fetch_onchain_fee(self):
+        """Fetches the market fee from the smart contract."""
+        if not myriad_contract_interface or not self.market_data:
+            log.warning("Web3 not initialized or market data not loaded, cannot fetch on-chain fee.")
+            return
+
+        market_id = self.market_data.get('id')
+        if market_id:
+            try:
+                log.info(f"Fetching on-chain fee for market ID {market_id}...")
+                fee_scaled = myriad_contract_interface.functions.getMarketFee(market_id).call()
+                self.fee = float(fee_scaled / 10**18)
+                log.info(f"Successfully fetched on-chain fee: {self.fee:.4f}")
+            except Exception as e:
+                log.error(f"Failed to fetch on-chain fee, using default of {self.fee}. Error: {e}")
+        else:
+            log.warning("Market ID not found in API data, using default fee.")
 
     def _parse_data(self) -> bool:
         """
@@ -184,8 +224,8 @@ class MyriadMarketAnalyzer:
         final_cost = self._lmsr_cost(q1_final, q2_final, self.b_param)
         
         trade_cost = final_cost - initial_cost
-        fee = trade_cost * FEE_RATE_BUY
-        total_cost = trade_cost + fee
+        fee_amount = trade_cost * self.fee
+        total_cost = trade_cost + fee_amount
         
         new_price1, new_price2 = self._compute_price(q1_final, q2_final, self.b_param)
         
@@ -193,7 +233,7 @@ class MyriadMarketAnalyzer:
             "shares_bought": shares_to_buy,
             "outcome": outcome_title,
             "cost_before_fee": trade_cost,
-            "fee": fee,
+            "fee": fee_amount,
             "total_cost": total_cost,
             "avg_price_per_share": total_cost / shares_to_buy if shares_to_buy > 0 else 0,
             "new_price1": new_price1,
@@ -207,7 +247,7 @@ class MyriadMarketAnalyzer:
             return
             
         outcome_title = self.outcome_titles.get(outcome_index, f"Outcome {outcome_index}")
-        print(f"\n--- Price Impact Analysis for Buying '{outcome_title}' Shares ---")
+        print(f"\n--- Price Impact Analysis for Buying '{outcome_title}' Shares (Fee: {self.fee*100:.2f}%) ---")
         header = f"{'Shares to Buy':<15} | {'Total Cost (USDC)':<20} | {'Avg Price':<12} | {'New P1 ({self.outcome_titles[0]})':<18} | {'New P2 ({self.outcome_titles[1]})':<18}"
         print(header)
         print("-" * len(header))

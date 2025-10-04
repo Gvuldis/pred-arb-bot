@@ -1,3 +1,4 @@
+# auto_matcher.py
 import logging
 import uuid
 import json
@@ -6,7 +7,7 @@ from datetime import datetime, timezone
 import requests
 import math
 
-from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, FEE_RATE_MYRIAD_BUY, log, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
+from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, log, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
 from jobs.fetch_new_bodega import fetch_and_notify_new_bodega
 from jobs.fetch_new_myriad import fetch_and_notify_new_myriad
 from jobs.prune_inactive_pairs import prune_all_inactive_pairs
@@ -14,7 +15,7 @@ from streamlit_app.db import (
     load_manual_pairs, load_manual_pairs_myriad,
     save_polymarkets,
     load_probability_watches, delete_probability_watch,
-    get_config_value, save_myriad_markets,
+    get_config_value, save_myriad_markets, load_myriad_markets,
     add_arb_opportunity, get_market_cooldown, update_market_cooldown
 )
 from matching.fuzzy import fetch_all_polymarket_clob_markets
@@ -94,7 +95,7 @@ def calculate_apy(roi: float, end_date_ms: int) -> float:
     return apy
 
 def fetch_and_save_markets():
-    """Fetches and saves markets for all platforms."""
+    """Fetches and saves markets for all platforms, including on-chain Myriad fees."""
     log.info("Starting job to fetch and save all platform markets...")
     try:
         # Polymarket
@@ -105,11 +106,11 @@ def fetch_and_save_markets():
         else:
             log.info("No active Polymarket markets found from API.")
         
-        # Myriad
+        # Myriad (this now includes fetching on-chain fees)
         fresh_myriad_markets = m_client.fetch_markets()
         if fresh_myriad_markets:
             save_myriad_markets(fresh_myriad_markets)
-            log.info(f"Saved/updated {len(fresh_myriad_markets)} Myriad markets.")
+            log.info(f"Saved/updated {len(fresh_myriad_markets)} Myriad markets (with fees).")
         else:
             log.info("No active Myriad markets found from API.")
             
@@ -209,15 +210,14 @@ def run_myriad_arb_check():
             log.info("No manual Myriad pairs to check. Skipping.")
             return
 
-        # --- OPTIMIZATION: Pre-fetch all Myriad market data once to reduce API calls ---
-        try:
-            all_myriad_markets = m_client.fetch_markets()
-            myriad_market_map = {m['slug']: m for m in all_myriad_markets}
-            log.info(f"Pre-fetched {len(myriad_market_map)} Myriad market configs for arb check.")
-        except Exception as e:
-            log.error(f"Failed to pre-fetch Myriad markets for arb check: {e}. Aborting.")
+        # --- EFFICIENCY IMPROVEMENT: Load market data from local DB cache ---
+        all_myriad_markets_db = load_myriad_markets()
+        if not all_myriad_markets_db:
+            log.warning("Myriad markets not found in local DB. Run the fetch job or wait for it to run.")
             return
-
+        myriad_market_map = {m['slug']: m for m in all_myriad_markets_db}
+        log.info(f"Loaded {len(myriad_market_map)} Myriad markets from DB cache for arb check.")
+        
         # Fetch current positions once, using the pre-fetched market data to avoid new API calls.
         myriad_positions = get_myriad_positions(myriad_market_map)
         poly_positions = get_poly_positions()
@@ -227,7 +227,7 @@ def run_myriad_arb_check():
         log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs:
             try:
-                # Use pre-fetched data instead of making a new API call
+                # Use pre-fetched data from DB cache
                 m_data = myriad_market_map.get(m_slug)
 
                 # ==========================================================
@@ -305,6 +305,11 @@ def run_myriad_arb_check():
                         final_end_date_ms = int(dt_object.timestamp() * 1000)
                     except (ValueError, TypeError):
                         log.warning(f"Could not parse Myriad end date: {market_expiry_utc}")
+                
+                market_fee = m_data.get('fee')
+                if market_fee is None:
+                    log.warning(f"Fee not found in DB for Myriad market {m_slug}, skipping.")
+                    continue
 
                 m_prices = m_client.parse_realtime_prices(m_data)
                 if not m_prices:
@@ -327,7 +332,7 @@ def run_myriad_arb_check():
                 if is_flipped:
                     order_book_poly_1, order_book_poly_2 = order_book_poly_2, order_book_poly_1
                 
-                pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, FEE_RATE_MYRIAD_BUY, B_param, P1_MYR_REALTIME=m_prices['price1'])
+                pair_opportunities = build_arbitrage_table_myriad(Q1, Q2, order_book_poly_1, order_book_poly_2, market_fee, B_param, P1_MYR_REALTIME=m_prices['price1'])
 
                 for summary in pair_opportunities:
                     summary['apy'] = calculate_apy(summary.get('roi', 0), final_end_date_ms)
@@ -340,7 +345,7 @@ def run_myriad_arb_check():
                         summary['poly_current_price'] = (order_book_poly_1[0][0] if summary['polymarket_side'] == 1 and order_book_poly_1 else (order_book_poly_2[0][0] if summary['polymarket_side'] == 2 and order_book_poly_2 else None))
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
                         summary['polymarket_side_title'] = p_data['outcome_yes'] if summary['polymarket_side'] == 1 else p_data['outcome_no']
-                        pair_desc = f"{m_data['title']} <-> {p_data['question']}"
+                        pair_desc = f"{m_data['name']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, m_slug, p_id))
 
                         if is_autotrade_safe:
@@ -355,7 +360,7 @@ def run_myriad_arb_check():
                                 opportunity_message = {
                                     "type": "buy", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(), "platform": "Myriad",
                                     "market_identifiers": {"myriad_slug": m_slug, "myriad_market_id": m_data.get('id'), "polymarket_condition_id": p_id, "polymarket_token_id_buy": polymarket_token_id_buy, "is_flipped": bool(is_flipped)},
-                                    "market_details": {"myriad_title": m_data.get('title'), "polymarket_question": p_data.get('question'), "market_expiry_utc": market_expiry_utc},
+                                    "market_details": {"myriad_title": m_data.get('name'), "polymarket_question": p_data.get('question'), "market_expiry_utc": market_expiry_utc, "market_fee": market_fee},
                                     "trade_plan": {"direction": summary.get('direction'), "myriad_side_to_buy": summary.get('myriad_side'), "polymarket_side_to_buy": summary.get('polymarket_side'), "myriad_shares_to_buy": summary.get('myriad_shares'), "estimated_myriad_cost_usd": summary.get('cost_myr_usd'), "polymarket_shares_to_buy": summary.get('polymarket_shares'), "polymarket_limit_price": polymarket_limit_price, "estimated_polymarket_cost_usd": summary.get('cost_poly_usd')},
                                     "profitability_metrics": {"estimated_profit_usd": summary.get('profit_usd'), "roi": summary.get('roi'), "apy": summary.get('apy')},
                                     "amm_parameters": {"myriad_q1": Q1, "myriad_q2": Q2, "myriad_liquidity": B_param}

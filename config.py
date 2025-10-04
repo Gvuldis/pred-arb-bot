@@ -1,3 +1,4 @@
+# config.py
 import os
 import logging
 from dotenv import load_dotenv
@@ -29,7 +30,7 @@ MYRIAD_PRIVATE_KEY = os.getenv("MYRIAD_PRIVATE_KEY")
 
 # Fee constants for arbitrage calculation
 FEE_RATE_BODEGA = 0.02  # 4% total fee on Bodega (2% market + 2% protocol)
-FEE_RATE_MYRIAD_BUY = 0.03 # 3% total fee on Myriad buys
+# REMOVED: FEE_RATE_MYRIAD_BUY is no longer hardcoded. It will be fetched from the contract.
 
 # --- Web3 and Myriad Contract Setup ---
 myriad_contract = None
@@ -50,7 +51,8 @@ else:
             log.warning("MYRIAD_PRIVATE_KEY not set. Myriad wallet interactions will be disabled.")
         
         MYRIAD_MARKET_ADDRESS = "0x3e0f5F8F5FB043aBFA475C0308417Bf72c463289"
-        MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"}],"name":"getMarketOutcomePrice","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"address","name":"user","type":"address"}],"name":"getUserMarketShares","outputs":[{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256[]","name":"outcomes","type":"uint256[]"}],"stateMutability":"view","type":"function"}]')
+        # ADDED getMarketFee to the ABI
+        MYRIAD_MARKET_ABI = json.loads('[{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"}],"name":"getMarketFee","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"uint256","name":"outcomeId","type":"uint256"}],"name":"getMarketOutcomePrice","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"marketId","type":"uint256"},{"internalType":"address","name":"user","type":"address"}],"name":"getUserMarketShares","outputs":[{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256[]","name":"outcomes","type":"uint256[]"}],"stateMutability":"view","type":"function"}]')
         
         myriad_contract = w3_abs.eth.contract(
             address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS),

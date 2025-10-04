@@ -1,3 +1,4 @@
+# services/myriad/client.py
 import requests
 import logging
 import math
@@ -12,26 +13,61 @@ class MyriadClient:
         self.contract = myriad_contract
 
     def fetch_markets(self) -> List[Dict]:
-        """Fetch all active Myriad markets."""
+        """Fetch all active Myriad markets and their on-chain fees."""
         log.info("Fetching fresh Myriad markets from API.")
         url = f"{self.api_url}/markets?network_id=274133&state=open&land_ids=myriad-szn2-usdc-v33"
         try:
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
-            markets = resp.json()
-            return [m for m in markets if len(m.get("outcomes", [])) == 2]
+            markets_api = resp.json()
+            
+            markets_with_fees = []
+            for m in markets_api:
+                if len(m.get("outcomes", [])) != 2:
+                    continue
+                
+                market_id = m.get('id')
+                if self.contract and market_id:
+                    try:
+                        log.info(f"Fetching on-chain fee for market ID: {market_id} ({m.get('slug')})")
+                        fee_scaled = self.contract.functions.getMarketFee(market_id).call()
+                        # Fee is returned scaled by 1e18, convert to a float (e.g., 0.03)
+                        m['fee'] = float(fee_scaled / 10**18)
+                    except Exception as e:
+                        log.error(f"Failed to fetch on-chain fee for {m.get('slug')}: {e}. Setting fee to None.")
+                        m['fee'] = None
+                else:
+                    m['fee'] = None
+                markets_with_fees.append(m)
+
+            return markets_with_fees
         except requests.RequestException as e:
             # Re-raise the exception to be handled by the caller
             log.error(f"Failed to fetch Myriad markets: {e}")
             raise
 
     def fetch_market_details(self, market_slug: str) -> Optional[Dict]:
-        """Retrieve a single Myriad market by its slug."""
+        """Retrieve a single Myriad market by its slug, including its on-chain fee."""
         url = f"{self.api_url}/markets/{market_slug}"
         try:
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            
+            # Fetch and attach the on-chain fee
+            market_id = data.get('id')
+            if self.contract and market_id:
+                try:
+                    log.info(f"Fetching on-chain fee for market ID: {market_id} ({data.get('slug')})")
+                    fee_scaled = self.contract.functions.getMarketFee(market_id).call()
+                    data['fee'] = float(fee_scaled / 10**18)
+                except Exception as e:
+                    log.error(f"Failed to fetch on-chain fee for {market_slug}: {e}. Setting fee to None.")
+                    data['fee'] = None
+            else:
+                data['fee'] = None
+            
+            return data
         except requests.RequestException as e:
             log.error(f"Failed to fetch market details for slug {market_slug}: {e}")
             return None
