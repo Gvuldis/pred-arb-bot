@@ -4,6 +4,7 @@ import logging
 import math
 from typing import List, Dict, Optional
 from web3.contract import Contract
+from .model import compute_price as compute_lmsr_price
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +30,8 @@ class MyriadClient:
                 market_id = m.get('id')
                 if self.contract and market_id:
                     try:
-                        log.info(f"Fetching on-chain fee for market ID: {market_id} ({m.get('slug')})")
+                        # Fetch fee only once when refreshing market data
                         fee_scaled = self.contract.functions.getMarketFee(market_id).call()
-                        # Fee is returned scaled by 1e18, convert to a float (e.g., 0.03)
                         m['fee'] = float(fee_scaled / 10**18)
                     except Exception as e:
                         log.error(f"Failed to fetch on-chain fee for {m.get('slug')}: {e}. Setting fee to None.")
@@ -42,7 +42,6 @@ class MyriadClient:
 
             return markets_with_fees
         except requests.RequestException as e:
-            # Re-raise the exception to be handled by the caller
             log.error(f"Failed to fetch Myriad markets: {e}")
             raise
 
@@ -54,11 +53,9 @@ class MyriadClient:
             resp.raise_for_status()
             data = resp.json()
             
-            # Fetch and attach the on-chain fee
             market_id = data.get('id')
             if self.contract and market_id:
                 try:
-                    log.info(f"Fetching on-chain fee for market ID: {market_id} ({data.get('slug')})")
                     fee_scaled = self.contract.functions.getMarketFee(market_id).call()
                     data['fee'] = float(fee_scaled / 10**18)
                 except Exception as e:
@@ -74,74 +71,61 @@ class MyriadClient:
             
     def parse_realtime_prices(self, market_data: Dict) -> Optional[Dict]:
         """
-        Parses market data, gets live on-chain prices, and re-calculates
-        the AMM state (q0, q1) for accurate arbitrage calculations.
+        Gets the live on-chain PRICE and creates a synthetic, but mathematically correct,
+        set of share counts for use in cost calculations.
         """
         if not market_data or len(market_data.get("outcomes", [])) != 2:
             return None
 
         try:
             market_id = market_data.get('id')
-            if not market_id:
-                log.error(f"Market data for '{market_data.get('slug')}' is missing 'id'.")
+            b_param = market_data.get("liquidity")
+
+            if not market_id or not b_param or b_param <= 0:
+                log.error(f"Market data for '{market_data.get('slug')}' is missing 'id' or 'liquidity'.")
                 return None
 
-            # --- Step 1: Fetch live on-chain prices ---
             if not self.contract:
-                log.warning("Myriad contract not initialized in config. Cannot fetch on-chain prices. Aborting price parse.")
+                log.warning("Myriad contract not initialized. Cannot fetch on-chain price.")
                 return None
             
+            # --- Step 1: Fetch the live on-chain PRICE (the ground truth for price) ---
             log.info(f"Fetching on-chain price for Myriad market ID: {market_id}")
             price0_scaled = self.contract.functions.getMarketOutcomePrice(market_id, 0).call()
-            price1_scaled = self.contract.functions.getMarketOutcomePrice(market_id, 1).call()
             
-            price0_onchain = float(price0_scaled / 10**18)
-            price1_onchain = float(price1_scaled / 10**18)
-            
-            # Basic validation
-            if not (0 < price0_onchain < 1 and 0 < price1_onchain < 1 and abs(price0_onchain + price1_onchain - 1.0) < 0.01):
-                 log.error(f"Invalid or non-summing on-chain prices for market {market_id}: p0={price0_onchain}, p1={price1_onchain}. Skipping.")
-                 return None
+            price0_live = float(price0_scaled / 10**18)
+            price1_live = 1.0 - price0_live
 
-            # --- Step 2: Get other parameters from API data ---
+            # --- Step 2: Derive the share DIFFERENCE from the live price ---
+            # The cost of a trade only depends on the *difference* between shares (q0 - q1), not their absolute values.
+            # We can calculate this difference directly from the price.
+            # Formula: q0 - q1 = B * log(price0 / price1)
+            if price0_live <= 0 or price1_live <= 0:
+                log.error(f"Invalid on-chain price ({price0_live}) for market {market_id}. Cannot proceed.")
+                return None
+            share_difference = b_param * math.log(price0_live / price1_live)
+
+            # --- Step 3: Create "synthetic" share counts for the calculation model ---
+            # We create a pair of q0/q1 that has the correct difference. The simplest way is to set one to 0.
+            # The resulting cost calculations will be mathematically identical to the real market state.
+            q0_synthetic = share_difference
+            q1_synthetic = 0.0
+            
+            log.info(f"Live price for {market_data.get('slug')} is {price0_live:.4f}. Using synthetic shares for calculation: q0={q0_synthetic:.2f}, q1={q1_synthetic:.2f}")
+
+            # --- Step 4: Get outcome titles from cached API data ---
             outcomes = market_data.get("outcomes", [])
             outcome0_api = next(o for o in outcomes if o.get('id') == 0)
             outcome1_api = next(o for o in outcomes if o.get('id') == 1)
 
-            q0_lag = outcome0_api.get("shares_held")
-            q1_lag = outcome1_api.get("shares_held")
-            b_param = market_data.get("liquidity")
-
-            if None in [q0_lag, q1_lag, b_param] or b_param <= 0:
-                log.error(f"Missing shares_held or liquidity from API for market {market_id}. Cannot recalculate shares.")
-                return None
-
-            # --- Step 3: Recalculate q0 and q1 using the on-chain price ---
-            # We solve a system of two linear equations:
-            # 1. q0 - q1 = b * log(p0/p1)    (derived from the LMSR price formula)
-            # 2. q0 + q1 = q0_lag + q1_lag  (approximating total shares as constant)
-            
-            # Constraint 1: Difference of shares
-            c1 = b_param * math.log(price0_onchain / price1_onchain) # This is q0 - q1
-            
-            # Constraint 2: Sum of shares
-            c2 = q0_lag + q1_lag # This is approximately q0 + q1
-
-            # Solve the system
-            q0_recalc = (c1 + c2) / 2.0
-            q1_recalc = (c2 - c1) / 2.0
-            
-            log.info(f"Recalculated shares for {market_data.get('slug')} (ID {market_id}): "
-                     f"q0={q0_recalc:.2f}, q1={q1_recalc:.2f} (was q0={q0_lag:.2f}, q1={q1_lag:.2f})")
-
             return {
-                # Use on-chain prices for opportunity detection.
-                # 'price1'/'shares1' correspond to outcome 0, 'price2'/'shares2' to outcome 1.
-                "price1": price0_onchain,
-                "price2": price1_onchain,
+                # Return the live price and the synthetic shares.
+                # The model will use these to calculate the correct trade cost.
+                "price1": price0_live,
+                "price2": price1_live,
                 
-                "shares1": q0_recalc,
-                "shares2": q1_recalc,
+                "shares1": q0_synthetic,
+                "shares2": q1_synthetic,
 
                 "title1": outcome0_api.get("title"),
                 "title2": outcome1_api.get("title"),
@@ -149,5 +133,5 @@ class MyriadClient:
                 "liquidity": b_param,
             }
         except Exception as e:
-            log.error(f"Error parsing on-chain prices for Myriad market {market_data.get('slug')}: {e}", exc_info=True)
+            log.error(f"Error parsing on-chain price for Myriad market {market_data.get('slug')}: {e}", exc_info=True)
             return None
