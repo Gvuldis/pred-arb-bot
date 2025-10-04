@@ -201,7 +201,7 @@ def run_bodega_arb_check():
 
 def run_myriad_arb_check():
     """Checks for arbitrage opportunities in Myriad-Polymarket pairs."""
-    log.info("--- Starting MYRIAD arbitrage-check job (with SELL check) ---")
+    log.info("--- Starting MYRIAD arbitrage-check job (with SELL and BUY checks) ---")
     try:
         manual_pairs = load_manual_pairs_myriad()
         opportunities = []
@@ -230,13 +230,16 @@ def run_myriad_arb_check():
                 # Use pre-fetched data from DB cache
                 m_data = myriad_market_map.get(m_slug)
 
+                # --- BUG FIX: Moved this check to the top of the loop for each pair ---
+                # If the market is not active, skip ALL checks for this pair.
+                if not m_data or m_data.get('state') != 'open':
+                    log.info(f"Myriad market {m_slug} is not 'open' in DB, skipping all checks for this pair.")
+                    continue
+                # --- END BUG FIX ---
+
                 # ==========================================================
                 # 1. EARLY EXIT (SELL) CHECK
                 # ==========================================================
-                if not m_data or m_data.get('state') != 'open':
-                    log.info(f"Myriad market {m_slug} is not open, skipping sell check.")
-                    continue
-                
                 myriad_market_id = m_data.get('id')
                 myr_pos = myriad_positions.get(myriad_market_id, {})
                 poly_pos = poly_positions.get(p_id, {})
