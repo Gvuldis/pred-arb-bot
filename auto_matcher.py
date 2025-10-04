@@ -269,7 +269,7 @@ def run_myriad_arb_check():
 
                     if paired_position:
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
-                        shares_to_sell = min(min_shares, 10.0)
+                        shares_to_sell = min(min_shares, 100.0)
                         
                         m_prices = m_client.parse_realtime_prices(m_data)
                         if not m_prices: continue

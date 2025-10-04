@@ -38,7 +38,7 @@ MIN_APY = float(os.getenv("MIN_APY", "5"))
 # --- Safety Parameters ---
 MIN_ETH_BALANCE = 0.0003
 MARKET_EXPIRY_BUFFER_MINUTES = 10
-TRADE_COOLDOWN_MINUTES = 1
+TRADE_COOLDOWN_MINUTES = 0.5
 CAPITAL_SAFETY_BUFFER_USD = 5.0 # New safety buffer
 
 # --- On-Chain Configuration ---
@@ -401,7 +401,7 @@ def process_sell_opportunity(opp: dict):
             myriad_outcome_id_sell = plan['myriad_outcome_id_sell']
             q_sell, q_other = (q1, q2) if myriad_outcome_id_sell == 0 else (q2, q1)
             recalculated_myr_revenue = myriad_model.calculate_sell_revenue(q_sell, q_other, b, final_myriad_shares_to_sell)
-            final_min_usdc_receive = recalculated_myr_revenue * 0.99
+            final_min_usdc_receive = recalculated_myr_revenue * 1
             log.info(f"[MYRIAD] Recalculated minimum USDC receive for {final_myriad_shares_to_sell:.4f} shares: ${final_min_usdc_receive:.4f}")
         else:
             original_shares = plan['myriad_shares_to_sell']
@@ -409,7 +409,7 @@ def process_sell_opportunity(opp: dict):
             if original_shares > 0:
                 scaling_factor = final_myriad_shares_to_sell / original_shares
                 final_min_usdc_receive = original_min_usd * scaling_factor
-                recalculated_myr_revenue = final_min_usdc_receive / 0.99
+                recalculated_myr_revenue = final_min_usdc_receive / 1
                 log.warning(f"[MYRIAD] amm_parameters missing. Using linear scaling for min USDC receive: ${final_min_usdc_receive:.4f}")
             else:
                 raise RuntimeError("Cannot determine min USDC receive for Myriad sell.")
