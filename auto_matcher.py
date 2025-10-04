@@ -269,7 +269,7 @@ def run_myriad_arb_check():
 
                     if paired_position:
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
-                        shares_to_sell = min(min_shares, 100.0)
+                        shares_to_sell = min(min_shares, 10.0)
                         
                         m_prices = m_client.parse_realtime_prices(m_data)
                         if not m_prices: continue
@@ -298,7 +298,7 @@ def run_myriad_arb_check():
                 # ==========================================================
                 # 2. ARBITRAGE (BUY) CHECK
                 # ==========================================================
-                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id}, Flipped={is_flipped}, Autotradeable={is_autotrade_safe} ---")
+                log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
                 
                 p_data = p_client.fetch_market(p_id)
 
@@ -327,6 +327,23 @@ def run_myriad_arb_check():
                     log.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                     continue
                 
+                # --- NEW ENHANCED LOGGING ---
+                poly_price_yes = p_data['order_book_yes'][0][0] if p_data.get('order_book_yes') else None
+                poly_price_no = p_data['order_book_no'][0][0] if p_data.get('order_book_no') else None
+                
+                myr_p0_title = m_prices['title1']
+                myr_p1_title = m_prices['title2']
+                poly_p_yes_title = p_data['outcome_yes']
+                poly_p_no_title = p_data['outcome_no']
+
+                if is_flipped:
+                    log.info(f"PRICES (Flipped): Myriad '{myr_p0_title}' @ {m_prices['price1']:.4f} vs Poly '{poly_p_no_title}' @ {poly_price_no if poly_price_no else 'N/A'}")
+                    log.info(f"PRICES (Flipped): Myriad '{myr_p1_title}' @ {m_prices['price2']:.4f} vs Poly '{poly_p_yes_title}' @ {poly_price_yes if poly_price_yes else 'N/A'}")
+                else:
+                    log.info(f"PRICES: Myriad '{myr_p0_title}' @ {m_prices['price1']:.4f} vs Poly '{poly_p_yes_title}' @ {poly_price_yes if poly_price_yes else 'N/A'}")
+                    log.info(f"PRICES: Myriad '{myr_p1_title}' @ {m_prices['price2']:.4f} vs Poly '{poly_p_no_title}' @ {poly_price_no if poly_price_no else 'N/A'}")
+                # --- END NEW LOGGING ---
+
                 Q1, Q2 = m_prices['shares1'], m_prices['shares2']
                 
                 B_param = m_data.get('liquidity')
