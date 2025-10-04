@@ -1,4 +1,3 @@
-# streamlit_app/1_Arb_Dashboard.py
 import sys, pathlib, time
 # Ensure the project root is on Python’s import path
 ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -443,20 +442,70 @@ def calculate_apy(roi: float, end_date_ms: int) -> float:
     return (roi / days_to_expiry) * 365
 
 st.markdown("##### Auto-Check Frequency Control")
-frequency_options = {"⚡ High (30 seconds)": 30, "👍 Normal (3 minutes)": 180, "🐌 Low (10 minutes)": 600, "⏸️ Paused (1 hour)": 3600}
+
+# --- Frequency options ---
+frequency_options = {
+    "⚡ High (30s)": 30, 
+    "⚡ Med (60s)": 60,
+    "👍 Normal (90s)": 90, 
+    "🐌 Low (3min)": 180, 
+    "⏸️ Paused (1hr)": 3600
+}
 seconds_to_name = {v: k for k, v in frequency_options.items()}
-current_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
-current_selection_name = seconds_to_name.get(current_interval_seconds)
 option_names = list(frequency_options.keys())
-try: current_index = option_names.index(current_selection_name) if current_selection_name else 1
-except ValueError: current_index = 1
-selected_frequency_name = st.radio("Set arbitrage check interval:", option_names, index=current_index, key="arb_frequency_radio", horizontal=True, label_visibility="collapsed")
-selected_seconds = frequency_options[selected_frequency_name]
-if selected_seconds != current_interval_seconds:
-    set_config_value('arb_check_interval_seconds', str(selected_seconds))
-    st.success(f"Arbitrage check frequency set to: **{selected_frequency_name}**. The background service will update within 15 seconds.")
-    time.sleep(1)
-    st.rerun()
+
+# --- Controls layout ---
+col1, col2 = st.columns(2)
+
+# --- Bodega Control ---
+with col1:
+    st.markdown("###### Bodega Check Interval")
+    current_bodega_interval = int(get_config_value('bodega_arb_check_interval_seconds', '90'))
+    current_bodega_name = seconds_to_name.get(current_bodega_interval)
+    try: 
+        bodega_index = option_names.index(current_bodega_name) if current_bodega_name else 2
+    except ValueError: 
+        bodega_index = 2
+    
+    selected_bodega_name = st.radio(
+        "Set Bodega arbitrage check interval:", 
+        option_names, 
+        index=bodega_index, 
+        key="bodega_arb_frequency_radio", 
+        horizontal=True, 
+        label_visibility="collapsed"
+    )
+    selected_bodega_seconds = frequency_options[selected_bodega_name]
+    if selected_bodega_seconds != current_bodega_interval:
+        set_config_value('bodega_arb_check_interval_seconds', str(selected_bodega_seconds))
+        st.success(f"Bodega check interval set to: **{selected_bodega_name}**.")
+        time.sleep(1)
+        st.rerun()
+
+# --- Myriad Control ---
+with col2:
+    st.markdown("###### Myriad Check Interval")
+    current_myriad_interval = int(get_config_value('myriad_arb_check_interval_seconds', '60'))
+    current_myriad_name = seconds_to_name.get(current_myriad_interval)
+    try:
+        myriad_index = option_names.index(current_myriad_name) if current_myriad_name else 1
+    except ValueError:
+        myriad_index = 1
+
+    selected_myriad_name = st.radio(
+        "Set Myriad arbitrage check interval:", 
+        option_names, 
+        index=myriad_index, 
+        key="myriad_arb_frequency_radio", 
+        horizontal=True, 
+        label_visibility="collapsed"
+    )
+    selected_myriad_seconds = frequency_options[selected_myriad_name]
+    if selected_myriad_seconds != current_myriad_interval:
+        set_config_value('myriad_arb_check_interval_seconds', str(selected_myriad_seconds))
+        st.success(f"Myriad check interval set to: **{selected_myriad_name}**.")
+        time.sleep(1)
+        st.rerun()
 
 if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking all pairs for arbitrage opportunities..."):

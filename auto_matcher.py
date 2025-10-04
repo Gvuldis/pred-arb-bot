@@ -1,4 +1,3 @@
-# auto_matcher.py
 import logging
 import uuid
 import json
@@ -405,10 +404,6 @@ def run_myriad_arb_check():
         log.error(f"Myriad arbitrage check job failed entirely: {e}", exc_info=True)
 
 
-def run_all_arb_checks():
-    run_bodega_arb_check()
-    run_myriad_arb_check()
-
 def run_prob_watch_check():
     """Checks Bodega markets against manually set expected probabilities."""
     log.info("Starting periodic probability watch check job")
@@ -446,11 +441,20 @@ def update_schedules(scheduler):
     """Checks for config changes from the DB and reschedules jobs accordingly."""
     log.info("Checking for schedule updates...")
     try:
-        arb_check_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
-        arb_job = scheduler.get_job('arb_check_job')
-        if arb_job and int(arb_job.trigger.interval.total_seconds()) != arb_check_interval_seconds:
-            log.warning(f"Rescheduling arbitrage check from {arb_job.trigger.interval.total_seconds()}s to {arb_check_interval_seconds}s.")
-            scheduler.reschedule_job('arb_check_job', trigger='interval', seconds=arb_check_interval_seconds)
+        # Bodega job
+        bodega_interval = int(get_config_value('bodega_arb_check_interval_seconds', '90'))
+        bodega_job = scheduler.get_job('bodega_arb_check_job')
+        if bodega_job and int(bodega_job.trigger.interval.total_seconds()) != bodega_interval:
+            log.warning(f"Rescheduling BODEGA arbitrage check from {bodega_job.trigger.interval.total_seconds()}s to {bodega_interval}s.")
+            scheduler.reschedule_job('bodega_arb_check_job', trigger='interval', seconds=bodega_interval)
+
+        # Myriad job
+        myriad_interval = int(get_config_value('myriad_arb_check_interval_seconds', '60'))
+        myriad_job = scheduler.get_job('myriad_arb_check_job')
+        if myriad_job and int(myriad_job.trigger.interval.total_seconds()) != myriad_interval:
+            log.warning(f"Rescheduling MYRIAD arbitrage check from {myriad_job.trigger.interval.total_seconds()}s to {myriad_interval}s.")
+            scheduler.reschedule_job('myriad_arb_check_job', trigger='interval', seconds=myriad_interval)
+
     except Exception as e:
         log.error(f"Failed to update schedules: {e}", exc_info=True)
 
@@ -461,22 +465,27 @@ if __name__ == "__main__":
     fetch_and_notify_new_bodega()
     fetch_and_notify_new_myriad()
     fetch_and_save_markets()
-    run_all_arb_checks()
+    run_bodega_arb_check()
+    run_myriad_arb_check()
     run_prob_watch_check()
     prune_all_inactive_pairs()
     log.info("Initial jobs complete.")
 
-    initial_arb_interval_seconds = int(get_config_value('arb_check_interval_seconds', '180'))
+    initial_bodega_interval = int(get_config_value('bodega_arb_check_interval_seconds', '90'))
+    initial_myriad_interval = int(get_config_value('myriad_arb_check_interval_seconds', '60'))
 
     sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15")
     sched.add_job(fetch_and_notify_new_myriad, "cron", minute="*/15")
     sched.add_job(fetch_and_save_markets, "cron", minute="*/15")
     sched.add_job(prune_all_inactive_pairs, "cron", hour="*")
-    sched.add_job(run_all_arb_checks, "interval", seconds=initial_arb_interval_seconds, id="arb_check_job")
+    
+    sched.add_job(run_bodega_arb_check, "interval", seconds=initial_bodega_interval, id="bodega_arb_check_job")
+    sched.add_job(run_myriad_arb_check, "interval", seconds=initial_myriad_interval, id="myriad_arb_check_job")
+    
     sched.add_job(run_prob_watch_check, "interval", minutes=3, id="prob_watch_job")
     sched.add_job(update_schedules, "interval", seconds=15, args=[sched])
 
-    log.info(f"Scheduler started. Arb-check interval: {initial_arb_interval_seconds}s.")
+    log.info(f"Scheduler started. Bodega interval: {initial_bodega_interval}s, Myriad interval: {initial_myriad_interval}s.")
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
