@@ -160,6 +160,10 @@ def run_bodega_arb_check(pairs_to_check: list):
 
         for b_id, p_id, is_flipped, profit_threshold, end_date_override in pairs_to_check:
             try:
+                # --- FIX for numpy.str_ TypeError on profit_threshold ---
+                profit_threshold = float(profit_threshold)
+                # --- END FIX ---
+                
                 log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
                 pool = bodega_market_map.get(b_id)
@@ -259,6 +263,10 @@ def run_myriad_arb_check(pairs_to_check: list):
 
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in pairs_to_check:
             try:
+                # --- FIX for numpy.str_ TypeError on profit_threshold ---
+                profit_threshold = float(profit_threshold)
+                # --- END FIX ---
+
                 m_data_raw = myriad_market_map_raw.get(m_slug)
                 if not m_data_raw or not m_data_raw['full_data_json']:
                     log.warning(f"Market data for '{m_slug}' not found or incomplete in DB cache. Skipping.")
