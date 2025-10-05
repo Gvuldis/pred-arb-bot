@@ -16,7 +16,7 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 # --- Local Project Imports ---
-from config import m_client, p_client, notifier, log, myriad_account, myriad_contract
+from config import m_client, p_client, notifier, log, myriad_account
 import streamlit_app.db as db
 import services.myriad.model as myriad_model
 from services.myriad.model import consume_order_book # Import for re-validation
@@ -204,43 +204,36 @@ def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, existing_
     log.error(f"[POLY] Polling timed out. Could not find trade details for order {order_id} after {max_attempts} attempts.")
     return clob_client.get_trades(), []
 
-# --- NEW HELPER FUNCTIONS FOR BALANCE CHECKS ---
-def get_polymarket_token_balance(token_id: str) -> float:
-    """Gets the balance for a specific Polymarket token ID using get_user_state."""
-    log.info(f"[POLY] Checking balance for token {token_id}...")
-    try:
-        user_state = clob_client.get_user_state()
-        balances = user_state.get('balances', {})
-        # The token_id from the API can be an integer, but the user_state keys are strings
-        balance_str = balances.get(str(token_id), '0')
-        balance = float(balance_str)
-        log.info(f"[POLY] Found balance for token {token_id}: {balance:.4f}")
-        return balance
-    except Exception as e:
-        log.error(f"[POLY] Failed to get balance for token {token_id}: {e}", exc_info=True)
-        return 0.0
 
-def get_myriad_outcome_balance(market_id: int, outcome_id: int) -> float:
-    """Gets the balance for a specific outcome in a Myriad market."""
-    log.info(f"[MYRIAD] Checking balance for market {market_id}, outcome {outcome_id}...")
-    if not myriad_contract or not myriad_account:
-        log.error("[MYRIAD] Contract or account not initialized for balance check.")
-        return 0.0
+# --- FIX: Function to get all polymarket positions ---
+def get_polymarket_positions() -> dict:
+    """ 
+    Fetches current Polymarket positions from the data API.
+    This is the correct method, as used in auto_matcher.py.
+    The ClobClient does not have a method like get_user_state() for balances.
+    Returns a dictionary mapping conditionId -> {outcome_name: size}.
+    """
+    if not POLY_PROXY_ADDRESS:
+        log.warning("[POLY] Polymarket proxy address not available for position check.")
+        return {}
+    
+    positions = {}
     try:
-        # This is the on-chain call
-        _liquidity, outcomes = myriad_contract.functions.getUserMarketShares(market_id, myriad_account.address).call()
+        log.info(f"[POLY] Fetching positions for user {POLY_PROXY_ADDRESS} from Data API...")
+        url = "https://data-api.polymarket.com/positions"
+        params = {"user": POLY_PROXY_ADDRESS, "sizeThreshold": 1} # Only get positions > 1 share
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
         
-        if outcome_id < len(outcomes):
-            # Shares are scaled by 1e6
-            balance = outcomes[outcome_id] / 1e6
-            log.info(f"[MYRIAD] Found balance for market {market_id}, outcome {outcome_id}: {balance:.4f}")
-            return float(balance)
-        else:
-            log.error(f"[MYRIAD] Invalid outcome_id {outcome_id} for market {market_id}.")
-            return 0.0
+        for pos in response.json():
+            positions[pos['conditionId']] = positions.get(pos['conditionId'], {})
+            positions[pos['conditionId']][pos['outcome']] = float(pos['size'])
+        log.info(f"[POLY] Found positions in {len(positions)} markets.")
+            
     except Exception as e:
-        log.error(f"[MYRIAD] Failed to get balance for market {market_id}, outcome {outcome_id}: {e}", exc_info=True)
-        return 0.0
+        log.error(f"[POLY] Failed to fetch Polymarket positions: {e}")
+    return positions
+
 
 # --- POLYGON (POLYMARKET) FUNCTIONS ---
 w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
@@ -408,28 +401,35 @@ def process_sell_opportunity(opp: dict):
         p_data = p_client.fetch_market(poly_id)
         if not m_data or m_data.get('state') != 'open' or not p_data or not p_data.get('active'):
             raise ValueError("One of the markets is no longer active.")
+
+        # --- NEW POSITION CHECK ---
+        log.info(f"[{trade_id}] Checking Polymarket position for condition ID {poly_id}...")
+        all_poly_positions = get_polymarket_positions()
+        market_positions = all_poly_positions.get(poly_id, {})
+        
+        token_to_sell = opp['market_identifiers']['polymarket_token_id_sell']
+        shares_to_sell = opp['trade_plan']['polymarket_shares_to_sell']
+        outcome_name_to_sell = None
+        
+        # Determine which outcome name corresponds to the token we're selling
+        if p_data.get('token_id_yes') and token_to_sell == p_data.get('token_id_yes'):
+            outcome_name_to_sell = p_data.get('outcome_yes')
+        elif p_data.get('token_id_no') and token_to_sell == p_data.get('token_id_no'):
+            outcome_name_to_sell = p_data.get('outcome_no')
+        
+        if not outcome_name_to_sell:
+            raise ValueError(f"Could not map token ID {token_to_sell} to an outcome for condition ID {poly_id}.")
+            
+        current_balance = market_positions.get(outcome_name_to_sell, 0.0)
+        log.info(f"[{trade_id}] Plan is to sell {shares_to_sell:.4f} of '{outcome_name_to_sell}'. Current balance: {current_balance:.4f} shares.")
+        
+        if current_balance < shares_to_sell:
+            raise ValueError(f"Insufficient Polymarket balance. Have {current_balance:.4f}, need {shares_to_sell:.4f}.")
+        # --- END NEW POSITION CHECK ---
+        
         log.info("✅ All Pre-flight checks for SELL passed.")
 
-        # STEP 2: FINAL BALANCE CONFIRMATION & EXECUTE SELLS
-        log.info(f"--- Performing final balance confirmation for SELL ---")
-        myriad_market_id = opp['market_identifiers']['myriad_market_id']
-        myriad_outcome_id_sell = opp['trade_plan']['myriad_outcome_id_sell']
-        poly_token_id_sell = opp['market_identifiers']['polymarket_token_id_sell']
-
-        # Fetch live balances
-        live_myriad_shares = get_myriad_outcome_balance(myriad_market_id, myriad_outcome_id_sell)
-        live_poly_shares = get_polymarket_token_balance(poly_token_id_sell)
-
-        log.info(f"Live Balances | Myriad: {live_myriad_shares:.4f} shares | Polymarket: {live_poly_shares:.4f} shares")
-
-        # Determine shares to sell based on the minimum balance, with a small buffer
-        shares_to_sell = min(live_myriad_shares, live_poly_shares) - 0.5
-        
-        if shares_to_sell < 1.0: # Most platforms have a minimum trade size of 1
-             raise ValueError(f"Insufficient paired shares to sell. Required > 1.5, found min({live_myriad_shares:.2f}, {live_poly_shares:.2f}). Aborting sell.")
-
-        log.warning(f"Original plan was to sell {opp['trade_plan']['polymarket_shares_to_sell']:.4f} shares. Recalculated to sell {shares_to_sell:.4f} based on live balances.")
-        
+        # STEP 2: EXECUTE SELLS
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
         plan = opp['trade_plan']
 
@@ -438,12 +438,12 @@ def process_sell_opportunity(opp: dict):
         existing_trade_ids = {t['id'] for t in clob_client.get_trades()} if EXECUTION_MODE != "DRY_RUN" else set()
         
         if EXECUTION_MODE == "DRY_RUN":
-            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(shares_to_sell), 'makingAmount': str(shares_to_sell * plan['polymarket_limit_price'])}}
+            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_sell']), 'makingAmount': str(plan['polymarket_shares_to_sell'] * plan['polymarket_limit_price'])}}
         else:
             poly_result = execute_polymarket_sell(
                 opp['market_identifiers']['polymarket_token_id_sell'],
                 plan['polymarket_limit_price'],
-                shares_to_sell
+                plan['polymarket_shares_to_sell']
             )
         if not poly_result.get('success'):
             raise RuntimeError(f"Failed Leg 1 (Poly SELL): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")

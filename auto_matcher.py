@@ -307,7 +307,7 @@ def run_myriad_arb_check(pairs_to_check: list):
                         
                         if shares_to_sell < 1.0:
                             continue
-
+                        
                         m_prices = m_client.parse_realtime_prices(m_data)
                         if not m_prices:
                              log.warning(f"Could not parse real-time prices for Myriad SELL check on {m_slug}, skipping.")
