@@ -23,10 +23,6 @@ def calculate_sell_revenue(q1_initial: float, q2_initial: float, b: float, share
     """Calculates the revenue from selling shares, including fees."""
     if shares_to_sell <= 0:
         return 0.0
-    # Ensure we don't sell more shares than available in the pool
-    if shares_to_sell > q1_initial:
-        log.warning(f"Attempting to sell {shares_to_sell} shares, but only {q1_initial} available. Capping sell amount.")
-        shares_to_sell = q1_initial
         
     initial_pool_cost = lmsr_cost(q1_initial, q2_initial, b)
     final_pool_cost = lmsr_cost(q1_initial - shares_to_sell, q2_initial, b)

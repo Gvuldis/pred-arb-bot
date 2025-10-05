@@ -270,8 +270,11 @@ def run_myriad_arb_check():
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
                         shares_to_sell = min(min_shares, 100.0)
                         
+                        # <<< FIX: Use parse_realtime_prices for consistent, live data in sell check >>>
                         m_prices = m_client.parse_realtime_prices(m_data)
-                        if not m_prices: continue
+                        if not m_prices:
+                             log.warning(f"Could not parse real-time prices for Myriad SELL check on {m_slug}, skipping.")
+                             continue
                         
                         q1, q2, b = m_prices['shares1'], m_prices['shares2'], m_prices['liquidity']
                         
