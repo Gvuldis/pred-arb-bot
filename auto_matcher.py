@@ -285,7 +285,7 @@ def run_myriad_arb_check():
                         
                         log.info(f"[SELL CHECK] Pair ({m_slug}, {p_id}): min_shares={min_shares:.2f}, shares_to_sell={shares_to_sell:.2f}, Myriad revenue=${myr_revenue:.2f}, Poly revenue=${poly_revenue:.2f}, Total=${total_revenue:.2f}")
 
-                        if total_revenue > (shares_to_sell * 1.03):
+                        if total_revenue > (shares_to_sell * 1.015):
                             log.warning(f"Found profitable early exit for {m_slug}! Total revenue for {shares_to_sell} shares is ${total_revenue:.2f}.")
                             sell_opp = {
                                 "type": "sell", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(),

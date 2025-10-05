@@ -282,7 +282,7 @@ def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, 
         # The `maxSharesToSell` parameter is a slippage guard. We increase it slightly (e.g., by 1%)
         # to allow for minor price movements between calculation and execution.
         # This prevents the "maximum sell amount exceeded" revert.
-        shares_with_slippage = shares_to_sell * 1.1
+        shares_with_slippage = shares_to_sell * 1.2
         
         # Both shares and USDC are scaled by 1e6 on Myriad's contract
         shares_wei = int(shares_with_slippage * (10**6))
