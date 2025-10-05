@@ -528,7 +528,7 @@ def setup_market_check_jobs(scheduler, platform: str):
         
         is_hp = tier_name == 'high_priority'
         segments = int(get_config_value(f'{platform_lower}_{tier_name}_segments', '3' if is_hp else '1'))
-        interval = int(get_config_value(f'{platform_lower}_{tier_name}_interval_seconds', '15' if is_hp else '90'))
+        interval = int(get_config_value(f'{platform_lower}_{tier_name}_interval_seconds', '5' if is_hp else '90'))
         
         if segments <= 0 or interval <= 5:
             log.error(f"Invalid config for {platform.upper()} {tier_name}. Skipping.")

@@ -116,7 +116,23 @@ def format_deadline_iso(iso_str):
         return format_deadline_ms(ts_ms)
     except (ValueError, TypeError):
         return "Invalid Date", "N/A", 0
+    
+def calculate_apy(roi: float, end_date_ms: int) -> float:
+    """Calculates APY given ROI and an end date timestamp in milliseconds."""
+    if not end_date_ms or roi <= 0:
+        return 0.0
 
+    now_utc = datetime.now(timezone.utc)
+    end_date_utc = datetime.fromtimestamp(end_date_ms / 1000, tz=timezone.utc)
+    
+    time_to_expiry = end_date_utc - now_utc
+    days_to_expiry = time_to_expiry.total_seconds() / (24 * 3600)
+
+    if days_to_expiry <= 0.01: # Avoid division by zero or huge APYs for near-expiry
+        return 0.0
+    
+    apy = (roi / days_to_expiry) * 365
+    return apy
 # —–– Event Calendars —–––––––––––––––––––––––––––––––––––––––––
 st.subheader("🗓 Event End Date Calendars")
 all_bodegas_for_calendar = get_all_bodegas()
