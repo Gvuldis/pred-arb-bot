@@ -366,7 +366,7 @@ def run_myriad_arb_check():
                     if is_flipped:
                         summary['polymarket_side'] = 2 if summary['polymarket_side'] == 1 else 1
 
-                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.02 and summary.get("apy", 0) >= 5:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05 and summary.get("apy", 0) >= 5:
                         summary['myriad_current_price'] = m_prices['price1'] if summary['myriad_side'] == 1 else m_prices['price2']
                         summary['poly_current_price'] = (order_book_poly_1[0][0] if summary['polymarket_side'] == 1 and order_book_poly_1 else (order_book_poly_2[0][0] if summary['polymarket_side'] == 2 and order_book_poly_2 else None))
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']
