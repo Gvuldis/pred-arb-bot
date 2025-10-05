@@ -91,6 +91,14 @@ def get_poly_positions() -> dict:
 
 def calculate_apy(roi: float, end_date_ms: int) -> float:
     """Calculates APY given ROI and an end date timestamp in milliseconds."""
+    # --- FIX for numpy.str_ TypeError ---
+    # Ensure end_date_ms is a valid integer before performing calculations.
+    try:
+        end_date_ms = int(end_date_ms)
+    except (ValueError, TypeError):
+        end_date_ms = 0 # Default to 0 if it's None or not a valid number string.
+    # --- END FIX ---
+
     if not end_date_ms or roi <= 0:
         return 0.0
 
