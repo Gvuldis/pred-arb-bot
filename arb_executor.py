@@ -38,7 +38,7 @@ MIN_APY = float(os.getenv("MIN_APY", "5"))
 # --- Safety Parameters ---
 MIN_ETH_BALANCE = 0.0003
 MARKET_EXPIRY_BUFFER_MINUTES = 10
-TRADE_COOLDOWN_MINUTES = 0.5
+TRADE_COOLDOWN_MINUTES = 0.2
 CAPITAL_SAFETY_BUFFER_USD = 5.0 # New safety buffer
 
 # --- On-Chain Configuration ---
