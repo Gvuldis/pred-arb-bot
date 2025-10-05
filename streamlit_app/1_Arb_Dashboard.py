@@ -13,6 +13,7 @@ from config import b_client, m_client, p_client, fx_client, notifier, BODEGA_API
 from services.polymarket.model import build_arbitrage_table as build_bodega_arb_table, infer_b
 from services.myriad.model import build_arbitrage_table_myriad
 from track_record import portfolio_summary
+from auto_matcher import calculate_apy # <<< BUG FIX: Import the function
 
 # Database helpers
 from streamlit_app.db import (
@@ -488,10 +489,10 @@ st.markdown("##### Auto-Check Frequency Control")
 
 # --- Frequency options ---
 frequency_options = {
-    "🔥 Insane (15s)": 15,
-    "⚡ High (30s)": 30, 
-    "⚡ Med (60s)": 60,
-    "👍 Normal (90s)": 90, 
+    "🔥 Insane (5s)": 5,
+    "⚡ High (15s)": 15, 
+    "⚡ Med (30s)": 30,
+    "👍 Normal (60s)": 60, 
     "🐌 Low (3min)": 180, 
     "⏸️ Paused (1hr)": 3600
 }
@@ -522,7 +523,7 @@ def schedule_control(platform: str, default_segments: int, default_interval: int
 
     with c2:
         current_hp_interval = int(get_config_value(f'{platform}_high_priority_interval_seconds', default_hp_interval))
-        current_hp_name = seconds_to_name.get(current_hp_interval, "🔥 Insane (15s)")
+        current_hp_name = seconds_to_name.get(current_hp_interval, "🔥 Insane (5s)")
         hp_index = option_names.index(current_hp_name)
         selected_hp_name = st.selectbox("HP Frequency", option_names, index=hp_index, key=f"{platform}_hp_freq")
         selected_hp_seconds = frequency_options[selected_hp_name]
@@ -544,7 +545,7 @@ def schedule_control(platform: str, default_segments: int, default_interval: int
             
     with c4:
         current_interval = int(get_config_value(f'{platform}_normal_priority_interval_seconds', default_interval))
-        current_name = seconds_to_name.get(current_interval, "👍 Normal (90s)")
+        current_name = seconds_to_name.get(current_interval, "👍 Normal (60s)")
         index = option_names.index(current_name)
         selected_name = st.selectbox("Normal Frequency", option_names, index=index, key=f"{platform}_freq")
         selected_seconds = frequency_options[selected_name]
