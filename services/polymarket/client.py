@@ -75,6 +75,7 @@ class PolymarketClient:
         return {
             'condition_id': condition_id,
             'question': market_data.get('question'),
+            'description': market_data.get('description'),
             'price_yes': price_1,
             'price_no': price_2,
             'order_book_yes': order_book_1_asks, # For backward compatibility

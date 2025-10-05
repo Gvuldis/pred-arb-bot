@@ -375,6 +375,8 @@ with tab_myriad:
                             st.markdown(f"- **'Yes' Outcome:** `{poly_details.get('outcome_yes', 'N/A')}`")
                             st.markdown(f"- **'No' Outcome:** `{poly_details.get('outcome_no', 'N/A')}`")
                             st.caption(f"Note: Some Polymarket markets use different outcome names besides 'Yes'/'No'.")
+                            st.markdown(f"**Description:**")
+                            st.markdown(poly_details.get('description', 'No description provided.'), unsafe_allow_html=True)
                         else:
                             st.warning("Could not load Polymarket market details.")
                 
@@ -407,6 +409,7 @@ with tab_myriad:
                         save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts, int(is_autotrade_safe_new))
                         st.success(f"Pair {m_slug}/{p_id} updated."); time.sleep(1); st.rerun()
                 st.markdown("---")
+
 
     st.subheader("🆕 Pending New Myriad Markets")
     pending_myriad = load_new_myriad_markets()
