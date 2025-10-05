@@ -2,9 +2,11 @@ import logging
 import uuid
 import json
 from apscheduler.schedulers.blocking import BlockingScheduler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 import math
+import numpy as np
+import time
 
 from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
 from jobs.fetch_new_bodega import fetch_and_notify_new_bodega
@@ -24,6 +26,14 @@ import services.myriad.model as myriad_model
 
 # Get a logger for this specific module
 log = logging.getLogger(__name__)
+
+# --- POSITION CACHING (OPTIMIZATION) ---
+# We will cache our own portfolio positions to avoid fetching them on every single segment check.
+_myriad_positions_cache = {}
+_poly_positions_cache = {}
+_myriad_positions_last_updated = 0
+_poly_positions_last_updated = 0
+POSITION_CACHE_TTL_SECONDS = 60 # Update positions every 60 seconds
 
 # --- POSITION TRACKING HELPERS ---
 def get_myriad_positions(myriad_market_map: dict) -> dict:
@@ -120,29 +130,27 @@ def fetch_and_save_markets():
         log.error(f"Failed to fetch and save all markets: {e}", exc_info=True)
 
 
-def run_bodega_arb_check():
-    """Checks for arbitrage opportunities in Bodega-Polymarket pairs."""
-    log.info("--- Starting BODEGA arbitrage-check job ---")
+def run_bodega_arb_check(pairs_to_check: list):
+    """Checks for arbitrage opportunities in a given list of Bodega-Polymarket pairs."""
+    log.info(f"--- Running BODEGA arbitrage-check job for {len(pairs_to_check)} pairs ---")
     try:
         ada_usd = fx_client.get_ada_usd()
-        manual_pairs = load_manual_pairs()
         opportunities = []
 
-        if not manual_pairs:
-            log.info("No manual Bodega pairs to check. Skipping.")
+        if not pairs_to_check:
+            log.info("No Bodega pairs in this segment to check. Skipping.")
             return
 
         # --- OPTIMIZATION: Fetch all market configs once ---
         try:
             all_bodega_markets = b_client.fetch_markets()
             bodega_market_map = {m['id']: m for m in all_bodega_markets}
-            log.info(f"Fetched {len(bodega_market_map)} active Bodega market configs.")
+            log.info(f"Fetched {len(bodega_market_map)} active Bodega market configs for segment check.")
         except Exception as e:
-            log.error(f"Failed to fetch Bodega market configs: {e}. Aborting Bodega arb check.")
+            log.error(f"Failed to fetch Bodega market configs: {e}. Aborting Bodega arb check for this segment.")
             return
 
-        log.info(f"Found {len(manual_pairs)} manual Bodega pairs to check.")
-        for b_id, p_id, is_flipped, profit_threshold, end_date_override in manual_pairs:
+        for b_id, p_id, is_flipped, profit_threshold, end_date_override in pairs_to_check:
             try:
                 log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
@@ -196,23 +204,23 @@ def run_bodega_arb_check():
             for pair, summary, b_id, p_id in opportunities:
                 notifier.notify_arb_opportunity(pair, summary, b_id, p_id, b_client.api_url)
         
-        log.info(f"Bodega arb check finished. Found {len(opportunities)} opportunities.")
+        log.info(f"Bodega arb check for segment finished. Found {len(opportunities)} opportunities.")
 
     except Exception as e:
-        log.error(f"Bodega arbitrage check job failed entirely: {e}", exc_info=True)
+        log.error(f"Bodega arbitrage check job for segment failed entirely: {e}", exc_info=True)
 
-def run_myriad_arb_check():
-    """Checks for arbitrage opportunities in Myriad-Polymarket pairs."""
-    log.info("--- Starting MYRIAD arbitrage-check job (with SELL and BUY checks) ---")
+def run_myriad_arb_check(pairs_to_check: list):
+    """Checks for arbitrage opportunities in a given list of Myriad-Polymarket pairs."""
+    global _myriad_positions_cache, _poly_positions_cache, _myriad_positions_last_updated, _poly_positions_last_updated
+
+    log.info(f"--- Running MYRIAD arbitrage-check job for {len(pairs_to_check)} pairs ---")
     try:
-        manual_pairs = load_manual_pairs_myriad()
         opportunities = []
 
-        if not manual_pairs:
-            log.info("No manual Myriad pairs to check. Skipping.")
+        if not pairs_to_check:
+            log.info("No Myriad pairs in this segment to check. Skipping.")
             return
 
-        # --- EFFICIENCY IMPROVEMENT: Load market data from local DB cache ---
         all_myriad_markets_db = load_myriad_markets()
         if not all_myriad_markets_db:
             log.warning("Myriad markets not found in local DB. Run the fetch job or wait for it to run.")
@@ -220,26 +228,36 @@ def run_myriad_arb_check():
         myriad_market_map_raw = {m['slug']: m for m in all_myriad_markets_db}
         log.info(f"Loaded {len(myriad_market_map_raw)} Myriad markets from DB cache for arb check.")
         
-        # Create a map of slug -> id for position checking
-        myriad_market_map_simple = {m['slug']: {'id': m['id']} for m in all_myriad_markets_db}
-        myriad_positions = get_myriad_positions(myriad_market_map_simple)
-        poly_positions = get_poly_positions()
+        # --- POSITION CACHING LOGIC ---
+        now = time.time()
+        if now - _myriad_positions_last_updated > POSITION_CACHE_TTL_SECONDS:
+            log.info("Myriad positions cache expired. Fetching fresh data.")
+            myriad_market_map_simple = {m['slug']: {'id': m['id']} for m in all_myriad_markets_db}
+            _myriad_positions_cache = get_myriad_positions(myriad_market_map_simple)
+            _myriad_positions_last_updated = now
+        else:
+            log.info("Using cached Myriad positions.")
+        myriad_positions = _myriad_positions_cache
+
+        if now - _poly_positions_last_updated > POSITION_CACHE_TTL_SECONDS:
+            log.info("Polymarket positions cache expired. Fetching fresh data.")
+            _poly_positions_cache = get_poly_positions()
+            _poly_positions_last_updated = now
+        else:
+            log.info("Using cached Polymarket positions.")
+        poly_positions = _poly_positions_cache
+        
         log.info(f"Found {len(myriad_positions)} Myriad market positions and {len(poly_positions)} Polymarket market positions.")
 
-
-        log.info(f"Found {len(manual_pairs)} manual Myriad pairs to check.")
-        for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs:
+        for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in pairs_to_check:
             try:
-                # Use pre-fetched data from DB cache
                 m_data_raw = myriad_market_map_raw.get(m_slug)
                 if not m_data_raw or not m_data_raw['full_data_json']:
                     log.warning(f"Market data for '{m_slug}' not found or incomplete in DB cache. Skipping.")
                     continue
                 
-                # The full market object is stored as a JSON string
                 m_data = json.loads(m_data_raw['full_data_json'])
 
-                # If the market is not active, skip ALL checks for this pair.
                 if m_data.get('state') != 'open':
                     log.info(f"Myriad market {m_slug} is not 'open', skipping all checks for this pair.")
                     continue
@@ -270,7 +288,6 @@ def run_myriad_arb_check():
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
                         shares_to_sell = min(min_shares, 100.0)
                         
-                        # <<< FIX: Use parse_realtime_prices for consistent, live data in sell check >>>
                         m_prices = m_client.parse_realtime_prices(m_data)
                         if not m_prices:
                              log.warning(f"Could not parse real-time prices for Myriad SELL check on {m_slug}, skipping.")
@@ -329,7 +346,6 @@ def run_myriad_arb_check():
                     log.warning(f"Could not parse real-time prices for Myriad market {m_slug}, skipping.")
                     continue
                 
-                # --- NEW ENHANCED LOGGING ---
                 poly_price_yes = p_data['order_book_yes'][0][0] if p_data.get('order_book_yes') else None
                 poly_price_no = p_data['order_book_no'][0][0] if p_data.get('order_book_no') else None
                 
@@ -344,7 +360,6 @@ def run_myriad_arb_check():
                 else:
                     log.info(f"PRICES: Myriad '{myr_p0_title}' @ {m_prices['price1']:.4f} vs Poly '{poly_p_yes_title}' @ {poly_price_yes if poly_price_yes else 'N/A'}")
                     log.info(f"PRICES: Myriad '{myr_p1_title}' @ {m_prices['price2']:.4f} vs Poly '{poly_p_no_title}' @ {poly_price_no if poly_price_no else 'N/A'}")
-                # --- END NEW LOGGING ---
 
                 Q1, Q2 = m_prices['shares1'], m_prices['shares2']
                 
@@ -401,10 +416,10 @@ def run_myriad_arb_check():
             for pair, summary, m_slug, p_id in opportunities:
                 notifier.notify_arb_opportunity_myriad(pair, summary, m_slug, p_id)
         
-        log.info(f"Myriad arb check finished. Found {len(opportunities)} BUY opportunities.")
+        log.info(f"Myriad arb check for segment finished. Found {len(opportunities)} BUY opportunities.")
 
     except Exception as e:
-        log.error(f"Myriad arbitrage check job failed entirely: {e}", exc_info=True)
+        log.error(f"Myriad arbitrage check job for segment failed entirely: {e}", exc_info=True)
 
 
 def run_prob_watch_check():
@@ -440,26 +455,112 @@ def run_prob_watch_check():
     except Exception as e:
         log.error(f"Probability watch job failed entirely: {e}", exc_info=True)
 
-def update_schedules(scheduler):
-    """Checks for config changes from the DB and reschedules jobs accordingly."""
-    log.info("Checking for schedule updates...")
-    try:
-        # Bodega job
-        bodega_interval = int(get_config_value('bodega_arb_check_interval_seconds', '90'))
-        bodega_job = scheduler.get_job('bodega_arb_check_job')
-        if bodega_job and int(bodega_job.trigger.interval.total_seconds()) != bodega_interval:
-            log.warning(f"Rescheduling BODEGA arbitrage check from {bodega_job.trigger.interval.total_seconds()}s to {bodega_interval}s.")
-            scheduler.reschedule_job('bodega_arb_check_job', trigger='interval', seconds=bodega_interval)
+def setup_market_check_jobs(scheduler, platform: str):
+    """
+    Dynamically creates two tiers of jobs: high-priority and normal-priority.
+    """
+    platform_lower = platform.lower()
+    log.info(f"Setting up new scheduler jobs for {platform.upper()}...")
 
-        # Myriad job
-        myriad_interval = int(get_config_value('myriad_arb_check_interval_seconds', '60'))
-        myriad_job = scheduler.get_job('myriad_arb_check_job')
-        if myriad_job and int(myriad_job.trigger.interval.total_seconds()) != myriad_interval:
-            log.warning(f"Rescheduling MYRIAD arbitrage check from {myriad_job.trigger.interval.total_seconds()}s to {myriad_interval}s.")
-            scheduler.reschedule_job('myriad_arb_check_job', trigger='interval', seconds=myriad_interval)
+    # 1. Clean up all old jobs for this platform to prevent duplicates
+    for job in scheduler.get_jobs():
+        if job.id.startswith(f"{platform_lower}_arb_check_job_"):
+            scheduler.remove_job(job.id)
 
-    except Exception as e:
-        log.error(f"Failed to update schedules: {e}", exc_info=True)
+    # 2. Get configuration and all pairs for the platform
+    if platform_lower == 'myriad':
+        all_pairs = load_manual_pairs_myriad()
+        market_data = {m['slug']: m for m in load_myriad_markets()}
+        check_function = run_myriad_arb_check
+        key_field = 'slug'
+    elif platform_lower == 'bodega':
+        all_pairs = load_manual_pairs()
+        market_data = {m['id']: m for m in b_client.fetch_markets(force_refresh=True)}
+        check_function = run_bodega_arb_check
+        key_field = 'id'
+    else:
+        return
+
+    if not all_pairs:
+        log.info(f"No manual pairs found for {platform.upper()}. No jobs scheduled.")
+        return
+
+    # 3. Sort pairs into high-priority and normal-priority lists
+    hp_threshold_hours = float(get_config_value(f'{platform_lower}_high_priority_threshold_hours', '10'))
+    priority_cutoff_time = datetime.now(timezone.utc) + timedelta(hours=hp_threshold_hours)
+    
+    high_priority_pairs = []
+    normal_priority_pairs = []
+
+    for pair in all_pairs:
+        market_key = pair[0]
+        data = market_data.get(market_key)
+        if not data:
+            continue
+
+        expires_at_str = data.get('expires_at') if platform_lower == 'myriad' else None
+        deadline_ms = data.get('deadline') if platform_lower == 'bodega' else None
+
+        market_end_time = None
+        try:
+            if expires_at_str:
+                market_end_time = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+            elif deadline_ms:
+                market_end_time = datetime.fromtimestamp(deadline_ms / 1000, tz=timezone.utc)
+        except (ValueError, TypeError):
+            pass # Ignore markets with invalid end dates
+
+        if market_end_time and market_end_time < priority_cutoff_time:
+            high_priority_pairs.append(pair)
+        else:
+            normal_priority_pairs.append(pair)
+    
+    log.info(f"[{platform.upper()}] Prioritization complete. High-priority: {len(high_priority_pairs)}, Normal-priority: {len(normal_priority_pairs)}.")
+
+    # 4. Schedule jobs for each priority tier
+    tiers = {
+        'high_priority': high_priority_pairs,
+        'normal_priority': normal_priority_pairs
+    }
+
+    for tier_name, pairs in tiers.items():
+        if not pairs:
+            continue
+        
+        is_hp = tier_name == 'high_priority'
+        
+        # Get config for the specific tier
+        segments = int(get_config_value(f'{platform_lower}_{tier_name}_segments', '3' if is_hp else '1'))
+        interval = int(get_config_value(f'{platform_lower}_{tier_name}_interval_seconds', '15' if is_hp else '90'))
+        
+        if segments <= 0 or interval <= 5:
+            log.error(f"Invalid config for {platform.upper()} {tier_name}. Skipping.")
+            continue
+
+        pair_segments = np.array_split(pairs, segments)
+        stagger_delay = interval / segments
+
+        for i, segment in enumerate(pair_segments):
+            if not segment.any():
+                continue
+
+            job_id = f"{platform_lower}_arb_check_job_{tier_name}_segment_{i}"
+            segment_list = [tuple(row) for row in segment]
+            
+            scheduler.add_job(
+                check_function, "interval", seconds=interval, id=job_id, args=[segment_list],
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=i * stagger_delay),
+                misfire_grace_time=30
+            )
+            log.info(f"Scheduled job '{job_id}' ({len(segment_list)} pairs) to run every {interval}s.")
+
+def reschedule_all_jobs(scheduler):
+    """Periodically re-evaluates market priorities and reschedules all jobs."""
+    log.info("--- Periodic Reschedule Triggered ---")
+    setup_market_check_jobs(scheduler, "myriad")
+    setup_market_check_jobs(scheduler, "bodega")
+    log.info("--- Periodic Reschedule Complete ---")
+
 
 if __name__ == "__main__":
     sched = BlockingScheduler(timezone="UTC")
@@ -468,27 +569,24 @@ if __name__ == "__main__":
     fetch_and_notify_new_bodega()
     fetch_and_notify_new_myriad()
     fetch_and_save_markets()
-    run_bodega_arb_check()
-    run_myriad_arb_check()
     run_prob_watch_check()
     prune_all_inactive_pairs()
     log.info("Initial jobs complete.")
 
-    initial_bodega_interval = int(get_config_value('bodega_arb_check_interval_seconds', '90'))
-    initial_myriad_interval = int(get_config_value('myriad_arb_check_interval_seconds', '60'))
-
+    # Schedule recurring, non-arb tasks
     sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15")
     sched.add_job(fetch_and_notify_new_myriad, "cron", minute="*/15")
     sched.add_job(fetch_and_save_markets, "cron", minute="*/15")
     sched.add_job(prune_all_inactive_pairs, "cron", hour="*")
-    
-    sched.add_job(run_bodega_arb_check, "interval", seconds=initial_bodega_interval, id="bodega_arb_check_job")
-    sched.add_job(run_myriad_arb_check, "interval", seconds=initial_myriad_interval, id="myriad_arb_check_job")
-    
     sched.add_job(run_prob_watch_check, "interval", minutes=3, id="prob_watch_job")
-    sched.add_job(update_schedules, "interval", seconds=15, args=[sched])
+    
+    # Run the dynamic scheduler once on startup
+    reschedule_all_jobs(sched)
+    
+    # Schedule the scheduler-updater to run periodically to catch markets crossing the priority threshold
+    sched.add_job(reschedule_all_jobs, "interval", minutes=5, args=[sched])
 
-    log.info(f"Scheduler started. Bodega interval: {initial_bodega_interval}s, Myriad interval: {initial_myriad_interval}s.")
+    log.info(f"Scheduler started with dynamic, two-tiered configuration.")
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

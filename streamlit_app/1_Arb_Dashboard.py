@@ -468,20 +468,11 @@ with tab_other:
 st.markdown("---")
 st.header("🚀 Manual Arbitrage Check")
 
-def calculate_apy(roi: float, end_date_ms: int) -> float:
-    """Calculates APY given ROI and an end date timestamp in milliseconds."""
-    if not end_date_ms or roi <= 0: return 0.0
-    now_utc = datetime.now(timezone.utc)
-    end_date_utc = datetime.fromtimestamp(end_date_ms / 1000, tz=timezone.utc)
-    time_to_expiry = end_date_utc - now_utc
-    days_to_expiry = time_to_expiry.total_seconds() / (24 * 3600)
-    if days_to_expiry <= 0.01: return 0.0
-    return (roi / days_to_expiry) * 365
-
 st.markdown("##### Auto-Check Frequency Control")
 
 # --- Frequency options ---
 frequency_options = {
+    "🔥 Insane (15s)": 15,
     "⚡ High (30s)": 30, 
     "⚡ Med (60s)": 60,
     "👍 Normal (90s)": 90, 
@@ -494,55 +485,64 @@ option_names = list(frequency_options.keys())
 # --- Controls layout ---
 col1, col2 = st.columns(2)
 
-# --- Bodega Control ---
-with col1:
-    st.markdown("###### Bodega Check Interval")
-    current_bodega_interval = int(get_config_value('bodega_arb_check_interval_seconds', '90'))
-    current_bodega_name = seconds_to_name.get(current_bodega_interval)
-    try: 
-        bodega_index = option_names.index(current_bodega_name) if current_bodega_name else 2
-    except ValueError: 
-        bodega_index = 2
+def schedule_control(platform: str, default_segments: int, default_interval: int, default_hp_segments: int, default_hp_interval: int, default_hp_threshold: int):
+    st.markdown(f"###### {platform.capitalize()} Checks")
     
-    selected_bodega_name = st.radio(
-        "Set Bodega arbitrage check interval:", 
-        option_names, 
-        index=bodega_index, 
-        key="bodega_arb_frequency_radio", 
-        horizontal=True, 
-        label_visibility="collapsed"
-    )
-    selected_bodega_seconds = frequency_options[selected_bodega_name]
-    if selected_bodega_seconds != current_bodega_interval:
-        set_config_value('bodega_arb_check_interval_seconds', str(selected_bodega_seconds))
-        st.success(f"Bodega check interval set to: **{selected_bodega_name}**.")
-        time.sleep(1)
-        st.rerun()
+    # --- High-Priority Tier ---
+    st.markdown("**High-Priority Checks (Markets Ending Soon)**")
+    c1, c2 = st.columns(2)
+    with c1:
+        current_hp_threshold = int(get_config_value(f'{platform}_high_priority_threshold_hours', default_hp_threshold))
+        new_hp_threshold = st.number_input("Time Threshold (Hours)", min_value=1, max_value=72, value=current_hp_threshold, step=1, key=f"{platform}_hp_threshold", help="Markets ending within this time are checked more frequently.")
+        if new_hp_threshold != current_hp_threshold:
+            set_config_value(f'{platform}_high_priority_threshold_hours', str(new_hp_threshold))
+            st.rerun()
+        
+        current_hp_segments = int(get_config_value(f'{platform}_high_priority_segments', default_hp_segments))
+        new_hp_segments = st.number_input("HP Segments", min_value=1, max_value=10, value=current_hp_segments, step=1, key=f"{platform}_hp_segments", help="Split high-priority markets into chunks.")
+        if new_hp_segments != current_hp_segments:
+            set_config_value(f'{platform}_high_priority_segments', str(new_hp_segments))
+            st.rerun()
 
-# --- Myriad Control ---
+    with c2:
+        current_hp_interval = int(get_config_value(f'{platform}_high_priority_interval_seconds', default_hp_interval))
+        current_hp_name = seconds_to_name.get(current_hp_interval, "🔥 Insane (15s)")
+        hp_index = option_names.index(current_hp_name)
+        selected_hp_name = st.selectbox("HP Frequency", option_names, index=hp_index, key=f"{platform}_hp_freq")
+        selected_hp_seconds = frequency_options[selected_hp_name]
+        if selected_hp_seconds != current_hp_interval:
+            set_config_value(f'{platform}_high_priority_interval_seconds', str(selected_hp_seconds))
+            st.rerun()
+        
+        st.caption(f"Effective HP rate: ~**{current_hp_interval / current_hp_segments:.1f}s** per check.")
+
+    # --- Normal-Priority Tier ---
+    st.markdown("**Normal-Priority Checks (All Other Markets)**")
+    c3, c4 = st.columns(2)
+    with c3:
+        current_segments = int(get_config_value(f'{platform}_normal_priority_segments', default_segments))
+        new_segments = st.number_input("Normal Segments", min_value=1, max_value=10, value=current_segments, step=1, key=f"{platform}_segments")
+        if new_segments != current_segments:
+            set_config_value(f'{platform}_normal_priority_segments', str(new_segments))
+            st.rerun()
+            
+    with c4:
+        current_interval = int(get_config_value(f'{platform}_normal_priority_interval_seconds', default_interval))
+        current_name = seconds_to_name.get(current_interval, "👍 Normal (90s)")
+        index = option_names.index(current_name)
+        selected_name = st.selectbox("Normal Frequency", option_names, index=index, key=f"{platform}_freq")
+        selected_seconds = frequency_options[selected_name]
+        if selected_seconds != current_interval:
+            set_config_value(f'{platform}_normal_priority_interval_seconds', str(selected_seconds))
+            st.rerun()
+        
+        st.caption(f"Effective Normal rate: ~**{current_interval / current_segments:.1f}s** per check.")
+
+with col1:
+    schedule_control("bodega", 1, 90, 1, 30, 10)
 with col2:
-    st.markdown("###### Myriad Check Interval")
-    current_myriad_interval = int(get_config_value('myriad_arb_check_interval_seconds', '60'))
-    current_myriad_name = seconds_to_name.get(current_myriad_interval)
-    try:
-        myriad_index = option_names.index(current_myriad_name) if current_myriad_name else 1
-    except ValueError:
-        myriad_index = 1
+    schedule_control("myriad", 3, 60, 3, 15, 10)
 
-    selected_myriad_name = st.radio(
-        "Set Myriad arbitrage check interval:", 
-        option_names, 
-        index=myriad_index, 
-        key="myriad_arb_frequency_radio", 
-        horizontal=True, 
-        label_visibility="collapsed"
-    )
-    selected_myriad_seconds = frequency_options[selected_myriad_name]
-    if selected_myriad_seconds != current_myriad_interval:
-        set_config_value('myriad_arb_check_interval_seconds', str(selected_myriad_seconds))
-        st.success(f"Myriad check interval set to: **{selected_myriad_name}**.")
-        time.sleep(1)
-        st.rerun()
 
 if st.button("Check All Manual Pairs for Arbitrage"):
     with st.spinner("Checking all pairs for arbitrage opportunities..."):
