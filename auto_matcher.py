@@ -5,7 +5,6 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timezone, timedelta
 import requests
 import math
-# import numpy as np  <- REMOVED NUMPY ENTIRELY
 import time
 
 from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
@@ -27,15 +26,29 @@ import services.myriad.model as myriad_model
 # Get a logger for this specific module
 log = logging.getLogger(__name__)
 
-# --- POSITION CACHING (OPTIMIZATION) ---
-# We will cache our own portfolio positions to avoid fetching them on every single segment check.
+# --- CACHING (OPTIMIZATION) ---
 _myriad_positions_cache = {}
 _poly_positions_cache = {}
+_ada_usd_price_cache = 0.85  # Initialize with a reasonable fallback
 _myriad_positions_last_updated = 0
 _poly_positions_last_updated = 0
-POSITION_CACHE_TTL_SECONDS = 60 # Update positions every 60 seconds
+_ada_usd_price_last_updated = 0
+POSITION_CACHE_TTL_SECONDS = 60 # Update portfolio positions every 60 seconds
+FX_CACHE_TTL_SECONDS = 60       # Update ADA price every 60 seconds
 
-# --- POSITION TRACKING HELPERS ---
+# --- HELPER FUNCTIONS ---
+def get_cached_ada_usd() -> float:
+    """Fetches ADA/USD price from the client, with caching."""
+    global _ada_usd_price_cache, _ada_usd_price_last_updated
+    now = time.time()
+    if now - _ada_usd_price_last_updated > FX_CACHE_TTL_SECONDS:
+        log.info("ADA/USD price cache expired. Fetching fresh data from FX client.")
+        _ada_usd_price_cache = fx_client.get_ada_usd()
+        _ada_usd_price_last_updated = now
+    else:
+        log.info(f"Using cached ADA/USD price: ${_ada_usd_price_cache}")
+    return _ada_usd_price_cache
+
 def get_myriad_positions(myriad_market_map: dict) -> dict:
     """ 
     Fetches current Myriad positions for all manually matched markets.
@@ -91,13 +104,10 @@ def get_poly_positions() -> dict:
 
 def calculate_apy(roi: float, end_date_ms: int) -> float:
     """Calculates APY given ROI and an end date timestamp in milliseconds."""
-    # --- FIX for numpy.str_ TypeError ---
-    # Ensure end_date_ms is a valid integer before performing calculations.
     try:
         end_date_ms = int(end_date_ms)
     except (ValueError, TypeError):
-        end_date_ms = 0 # Default to 0 if it's None or not a valid number string.
-    # --- END FIX ---
+        end_date_ms = 0
 
     if not end_date_ms or roi <= 0:
         return 0.0
@@ -108,7 +118,7 @@ def calculate_apy(roi: float, end_date_ms: int) -> float:
     time_to_expiry = end_date_utc - now_utc
     days_to_expiry = time_to_expiry.total_seconds() / (24 * 3600)
 
-    if days_to_expiry <= 0.01: # Avoid division by zero or huge APYs for near-expiry
+    if days_to_expiry <= 0.01:
         return 0.0
     
     apy = (roi / days_to_expiry) * 365
@@ -142,14 +152,13 @@ def run_bodega_arb_check(pairs_to_check: list):
     """Checks for arbitrage opportunities in a given list of Bodega-Polymarket pairs."""
     log.info(f"--- Running BODEGA arbitrage-check job for {len(pairs_to_check)} pairs ---")
     try:
-        ada_usd = fx_client.get_ada_usd()
+        ada_usd = get_cached_ada_usd() # Use cached price
         opportunities = []
 
         if not pairs_to_check:
             log.info("No Bodega pairs in this segment to check. Skipping.")
             return
 
-        # --- OPTIMIZATION: Fetch all market configs once ---
         try:
             all_bodega_markets = b_client.fetch_markets()
             bodega_market_map = {m['id']: m for m in all_bodega_markets}
@@ -160,9 +169,7 @@ def run_bodega_arb_check(pairs_to_check: list):
 
         for b_id, p_id, is_flipped, profit_threshold, end_date_override in pairs_to_check:
             try:
-                # --- FIX for numpy.str_ TypeError on profit_threshold ---
                 profit_threshold = float(profit_threshold)
-                # --- END FIX ---
                 
                 log.info(f"--- Checking Bodega Pair: ID={b_id}, Poly ID={p_id} ---")
                 
@@ -240,7 +247,6 @@ def run_myriad_arb_check(pairs_to_check: list):
         myriad_market_map_raw = {m['slug']: m for m in all_myriad_markets_db}
         log.info(f"Loaded {len(myriad_market_map_raw)} Myriad markets from DB cache for arb check.")
         
-        # --- POSITION CACHING LOGIC ---
         now = time.time()
         if now - _myriad_positions_last_updated > POSITION_CACHE_TTL_SECONDS:
             log.info("Myriad positions cache expired. Fetching fresh data.")
@@ -263,9 +269,7 @@ def run_myriad_arb_check(pairs_to_check: list):
 
         for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in pairs_to_check:
             try:
-                # --- FIX for numpy.str_ TypeError on profit_threshold ---
                 profit_threshold = float(profit_threshold)
-                # --- END FIX ---
 
                 m_data_raw = myriad_market_map_raw.get(m_slug)
                 if not m_data_raw or not m_data_raw['full_data_json']:
@@ -278,9 +282,6 @@ def run_myriad_arb_check(pairs_to_check: list):
                     log.info(f"Myriad market {m_slug} is not 'open', skipping all checks for this pair.")
                     continue
 
-                # ==========================================================
-                # 1. EARLY EXIT (SELL) CHECK
-                # ==========================================================
                 myriad_market_id = m_data.get('id')
                 myr_pos = myriad_positions.get(myriad_market_id, {})
                 poly_pos = poly_positions.get(p_id, {})
@@ -330,9 +331,6 @@ def run_myriad_arb_check(pairs_to_check: list):
                             }
                             add_arb_opportunity(sell_opp)
 
-                # ==========================================================
-                # 2. ARBITRAGE (BUY) CHECK
-                # ==========================================================
                 log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
                 
                 p_data = p_client.fetch_market(p_id)
@@ -478,12 +476,10 @@ def setup_market_check_jobs(scheduler, platform: str):
     platform_lower = platform.lower()
     log.info(f"Setting up new scheduler jobs for {platform.upper()}...")
 
-    # 1. Clean up all old jobs for this platform to prevent duplicates
     for job in scheduler.get_jobs():
         if job.id.startswith(f"{platform_lower}_arb_check_job_"):
             scheduler.remove_job(job.id)
 
-    # 2. Get configuration and all pairs for the platform
     if platform_lower == 'myriad':
         all_pairs = load_manual_pairs_myriad()
         market_data = {m['slug']: m for m in load_myriad_markets()}
@@ -499,7 +495,6 @@ def setup_market_check_jobs(scheduler, platform: str):
         log.info(f"No manual pairs found for {platform.upper()}. No jobs scheduled.")
         return
 
-    # 3. Sort pairs into high-priority and normal-priority lists
     hp_threshold_hours = float(get_config_value(f'{platform_lower}_high_priority_threshold_hours', '10'))
     priority_cutoff_time = datetime.now(timezone.utc) + timedelta(hours=hp_threshold_hours)
     
@@ -509,20 +504,15 @@ def setup_market_check_jobs(scheduler, platform: str):
     for pair in all_pairs:
         market_key = pair[0]
         data = market_data.get(market_key)
-        if not data:
-            continue
+        if not data: continue
 
         expires_at_str = data.get('expires_at') if platform_lower == 'myriad' else None
         deadline_ms = data.get('deadline') if platform_lower == 'bodega' else None
-
         market_end_time = None
         try:
-            if expires_at_str:
-                market_end_time = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-            elif deadline_ms:
-                market_end_time = datetime.fromtimestamp(deadline_ms / 1000, tz=timezone.utc)
-        except (ValueError, TypeError):
-            pass # Ignore markets with invalid end dates
+            if expires_at_str: market_end_time = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+            elif deadline_ms: market_end_time = datetime.fromtimestamp(deadline_ms / 1000, tz=timezone.utc)
+        except (ValueError, TypeError): pass
 
         if market_end_time and market_end_time < priority_cutoff_time:
             high_priority_pairs.append(pair)
@@ -531,19 +521,12 @@ def setup_market_check_jobs(scheduler, platform: str):
     
     log.info(f"[{platform.upper()}] Prioritization complete. High-priority: {len(high_priority_pairs)}, Normal-priority: {len(normal_priority_pairs)}.")
 
-    # 4. Schedule jobs for each priority tier
-    tiers = {
-        'high_priority': high_priority_pairs,
-        'normal_priority': normal_priority_pairs
-    }
+    tiers = {'high_priority': high_priority_pairs, 'normal_priority': normal_priority_pairs}
 
     for tier_name, pairs in tiers.items():
-        if not pairs:
-            continue
+        if not pairs: continue
         
         is_hp = tier_name == 'high_priority'
-        
-        # Get config for the specific tier
         segments = int(get_config_value(f'{platform_lower}_{tier_name}_segments', '3' if is_hp else '1'))
         interval = int(get_config_value(f'{platform_lower}_{tier_name}_interval_seconds', '15' if is_hp else '90'))
         
@@ -551,16 +534,12 @@ def setup_market_check_jobs(scheduler, platform: str):
             log.error(f"Invalid config for {platform.upper()} {tier_name}. Skipping.")
             continue
 
-        # --- REPLACED NUMPY WITH PLAIN PYTHON FOR SEGMENTATION ---
         pair_segments = [pairs[i::segments] for i in range(segments)]
         stagger_delay = interval / segments
 
         for i, segment_list in enumerate(pair_segments):
-            if not segment_list:
-                continue
-
+            if not segment_list: continue
             job_id = f"{platform_lower}_arb_check_job_{tier_name}_segment_{i}"
-            
             scheduler.add_job(
                 check_function, "interval", seconds=interval, id=job_id, args=[segment_list],
                 next_run_time=datetime.now(timezone.utc) + timedelta(seconds=i * stagger_delay),
@@ -587,17 +566,13 @@ if __name__ == "__main__":
     prune_all_inactive_pairs()
     log.info("Initial jobs complete.")
 
-    # Schedule recurring, non-arb tasks
     sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15")
     sched.add_job(fetch_and_notify_new_myriad, "cron", minute="*/15")
     sched.add_job(fetch_and_save_markets, "cron", minute="*/15")
     sched.add_job(prune_all_inactive_pairs, "cron", hour="*")
     sched.add_job(run_prob_watch_check, "interval", minutes=3, id="prob_watch_job")
     
-    # Run the dynamic scheduler once on startup
     reschedule_all_jobs(sched)
-    
-    # Schedule the scheduler-updater to run periodically to catch markets crossing the priority threshold
     sched.add_job(reschedule_all_jobs, "interval", minutes=5, args=[sched])
 
     log.info(f"Scheduler started with dynamic, two-tiered configuration.")
