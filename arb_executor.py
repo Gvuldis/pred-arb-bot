@@ -1,4 +1,3 @@
-# arb_executor.py
 import os
 import math
 import logging
@@ -20,6 +19,7 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from config import m_client, p_client, notifier, log, myriad_account
 import streamlit_app.db as db
 import services.myriad.model as myriad_model
+from services.myriad.model import consume_order_book # Import for re-validation
 
 # ==============================================================================
 # 1. CONFIGURATION AND SETUP
@@ -169,6 +169,41 @@ def find_myriad_trade_details(market_id: int, expected_cost: float, myriad_addre
             f"Could not find Myriad trade details for trade ID `{trade_id}` on market `{market_title}` ({market_id}). "
             f"Please manually verify the trade. Expected cost was ~${expected_cost:.2f}."
         )
+
+# --- NEW HELPER FUNCTION FOR EFFICIENT POLLING ---
+def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, existing_trade_ids: set, max_attempts: int = 10, sleep_interval: int = 1):
+    """
+    Polls the get_trades endpoint to find new trades for a given order ID.
+    
+    Args:
+        clob_client: The instance of the ClobClient.
+        order_id: The ID of the order to look for trades from.
+        existing_trade_ids: A set of trade IDs that existed before this order.
+        max_attempts: The maximum number of times to poll.
+        sleep_interval: The number of seconds to sleep between polls.
+
+    Returns:
+        A tuple containing (all_trades_after_list, new_trades_list).
+        Returns (latest_list, []) if no new trades are found after all attempts.
+    """
+    log.info(f"[POLY] Polling for trade details for order {order_id}...")
+    for attempt in range(max_attempts):
+        all_my_trades_after = clob_client.get_trades()
+        new_trades = [
+            t for t in all_my_trades_after 
+            if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id
+        ]
+        
+        if new_trades:
+            log.info(f"[POLY] Found {len(new_trades)} new trade(s) on attempt {attempt + 1}.")
+            return all_my_trades_after, new_trades
+        
+        log.info(f"[POLY] Attempt {attempt + 1}/{max_attempts}: No new trades found yet. Waiting {sleep_interval}s...")
+        time.sleep(sleep_interval)
+    
+    log.error(f"[POLY] Polling timed out. Could not find trade details for order {order_id} after {max_attempts} attempts.")
+    return clob_client.get_trades(), []
+
 
 # --- POLYGON (POLYMARKET) FUNCTIONS ---
 w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
@@ -363,13 +398,13 @@ def process_sell_opportunity(opp: dict):
         order_id = fak_response.get('orderID')
 
         if EXECUTION_MODE != "DRY_RUN" and order_id:
-            log.info(f"[POLY] Sell Order {order_id} submitted (status: {fak_response.get('status')}). Waiting 5s for trade details...")
-            time.sleep(5)
-            all_my_trades_after = clob_client.get_trades()
+            log.info(f"[POLY] Sell Order {order_id} submitted (status: {fak_response.get('status')}).")
+            # --- MODIFICATION: Use fast polling instead of static sleep ---
+            all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
             db.save_poly_trades(all_my_trades_after)
-            new_trades = [t for t in all_my_trades_after if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id]
+
             if new_trades:
-                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for order {order_id}")
+                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for sell order {order_id}")
                 for trade in new_trades:
                     for mo in trade.get('maker_orders', []):
                         matched_amount = float(mo.get('matched_amount', '0'))
@@ -451,62 +486,101 @@ def process_opportunity(opp: dict):
     market_key = f"myriad_{myriad_slug}"
 
     try:
+        # ======================================================================
+        # --- NEW: FINAL CONFIRMATION CHECK ---
+        # Re-fetch live data and re-calculate profit before executing.
+        # This prevents executing stale opportunities from the queue.
+        # ======================================================================
+        log.info(f"[{trade_id}] Performing final confirmation check...")
+        
+        m_data_live = m_client.fetch_market_details(myriad_slug)
+        m_prices_live = m_client.parse_realtime_prices(m_data_live)
+        p_data_live = p_client.fetch_market(poly_id)
+        
+        if not m_prices_live or not p_data_live:
+            raise ValueError("Could not fetch live data for re-validation.")
+
+        # Re-calculate costs based on the original trade plan and LIVE data
+        plan = opp['trade_plan']
+        market_fee = opp['market_details']['market_fee']
+        q1_live, q2_live, b_live = m_prices_live['shares1'], m_prices_live['shares2'], m_prices_live['liquidity']
+        
+        initial_cost_live = myriad_model.lmsr_cost(q1_live, q2_live, b_live)
+        q1_final_live, q2_final_live = (q1_live + plan['myriad_shares_to_buy'], q2_live) if plan['myriad_side_to_buy'] == 1 else (q1_live, q2_live + plan['myriad_shares_to_buy'])
+        
+        reval_myriad_cost = (myriad_model.lmsr_cost(q1_final_live, q2_final_live, b_live) - initial_cost_live) * (1 + market_fee)
+        
+        poly_book_live = p_data_live['order_book_yes'] if plan['polymarket_side_to_buy'] == 1 else p_data_live['order_book_no']
+        if opp['market_identifiers']['is_flipped']:
+             poly_book_live = p_data_live['order_book_no'] if plan['polymarket_side_to_buy'] == 1 else p_data_live['order_book_yes']
+
+        _, reval_poly_cost, _ = consume_order_book(poly_book_live, plan['polymarket_shares_to_buy'])
+        
+        reval_total_cost = reval_myriad_cost + reval_poly_cost
+        reval_profit = plan['myriad_shares_to_buy'] - reval_total_cost
+        reval_roi = reval_profit / reval_total_cost if reval_total_cost > 0 else 0
+
+        log.info(f"[{trade_id}] Re-validation results: Profit=${reval_profit:.2f} (Original: ${opp['profitability_metrics']['estimated_profit_usd']:.2f}), ROI={reval_roi:.2%} (Original: {opp['profitability_metrics']['roi']:.2%})")
+
+        if reval_profit < MIN_PROFIT_USD or reval_roi < MIN_ROI:
+            log.warning(f"[{trade_id}] Stale opportunity. Profitability dropped below threshold. Discarding trade.")
+            return # Exit the function, do not trade
+
+        log.info(f"[{trade_id}] ✅ Final confirmation passed. Proceeding with trade.")
+        # --- END OF FINAL CONFIRMATION CHECK ---
+
         # STEP 1: PRE-FLIGHT CHECKS
         log.info("--- Performing pre-flight checks ---")
-        market_fee = opp['market_details'].get('market_fee')
         if market_fee is None: raise ValueError("Market fee not found in opportunity data.")
 
         pair_info = next((p for p in db.load_manual_pairs_myriad() if p[0] == myriad_slug and p[1] == poly_id), None)
         if not pair_info or not pair_info[5]: raise ValueError(f"Autotrade check failed.")
-        m_market_details = m_client.fetch_market_details(myriad_slug)
-        if m_market_details.get('state') != 'open': raise ValueError(f"Myriad market is not 'open'.")
-        p_data = p_client.fetch_market(poly_id)
-        if not p_data.get('active') or p_data.get('closed'): raise ValueError(f"Polymarket market is not active/is closed.")
+        if m_data_live.get('state') != 'open': raise ValueError(f"Myriad market is not 'open'.")
+        if not p_data_live.get('active') or p_data_live.get('closed'): raise ValueError(f"Polymarket market is not active/is closed.")
         expiry_dt = datetime.fromisoformat(opp['market_details']['market_expiry_utc'].replace('Z', '+00:00'))
         if datetime.now(timezone.utc) > (expiry_dt - timedelta(minutes=MARKET_EXPIRY_BUFFER_MINUTES)): raise ValueError(f"Market expires too soon.")
         last_trade_ts = db.get_market_cooldown(market_key)
         if last_trade_ts and datetime.now(timezone.utc) < (datetime.fromisoformat(last_trade_ts) + timedelta(minutes=TRADE_COOLDOWN_MINUTES)): raise ValueError(f"Market is on cooldown.")
         if get_abstract_eth_balance() < MIN_ETH_BALANCE: raise ValueError(f"Insufficient gas on Myriad.")
             
-        trade_plan = opp['trade_plan']
-        if EXECUTION_MODE == "LIMITED_LIVE" and trade_plan['estimated_polymarket_cost_usd'] > LIMITED_LIVE_CAP_USD:
-            scaling_factor = LIMITED_LIVE_CAP_USD / trade_plan['estimated_polymarket_cost_usd']
-            trade_plan['polymarket_shares_to_buy'] *= scaling_factor
-            trade_plan['myriad_shares_to_buy'] *= scaling_factor
+        if EXECUTION_MODE == "LIMITED_LIVE" and plan['estimated_polymarket_cost_usd'] > LIMITED_LIVE_CAP_USD:
+            scaling_factor = LIMITED_LIVE_CAP_USD / plan['estimated_polymarket_cost_usd']
+            plan['polymarket_shares_to_buy'] *= scaling_factor
+            plan['myriad_shares_to_buy'] *= scaling_factor
         
         amm = opp['amm_parameters']
         myriad_b = amm['myriad_liquidity']
         initial_cost = myriad_model.lmsr_cost(amm['myriad_q1'], amm['myriad_q2'], myriad_b)
-        trade_plan['estimated_polymarket_cost_usd'] = trade_plan['polymarket_shares_to_buy'] * trade_plan['polymarket_limit_price']
-        q1_f_est, q2_f_est = (amm['myriad_q1'] + trade_plan['myriad_shares_to_buy'], amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + trade_plan['myriad_shares_to_buy'])
-        trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_est, q2_f_est, myriad_b) - initial_cost) * (1 + market_fee)
-        opp['trade_plan'] = trade_plan
-        log.info(f"Initial Full Trade Plan: Buy {trade_plan['polymarket_shares_to_buy']:.2f} Poly for ~${trade_plan['estimated_polymarket_cost_usd']:.4f}. Buy {trade_plan['myriad_shares_to_buy']:.2f} Myriad for ~${trade_plan['estimated_myriad_cost_usd']:.4f}")
+        plan['estimated_polymarket_cost_usd'] = plan['polymarket_shares_to_buy'] * plan['polymarket_limit_price']
+        q1_f_est, q2_f_est = (amm['myriad_q1'] + plan['myriad_shares_to_buy'], amm['myriad_q2']) if plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + plan['myriad_shares_to_buy'])
+        plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_est, q2_f_est, myriad_b) - initial_cost) * (1 + market_fee)
+        opp['trade_plan'] = plan
+        log.info(f"Initial Full Trade Plan: Buy {plan['polymarket_shares_to_buy']:.2f} Poly for ~${plan['estimated_polymarket_cost_usd']:.4f}. Buy {plan['myriad_shares_to_buy']:.2f} Myriad for ~${plan['estimated_myriad_cost_usd']:.4f}")
             
         myriad_usdc_balance = get_abstract_usdc_balance()
         poly_usdc_balance = get_polygon_usdc_balance()
-        if myriad_usdc_balance < trade_plan['estimated_myriad_cost_usd'] or poly_usdc_balance < trade_plan['estimated_polymarket_cost_usd']:
+        if myriad_usdc_balance < plan['estimated_myriad_cost_usd'] or poly_usdc_balance < plan['estimated_polymarket_cost_usd']:
             log.warning("Insufficient capital for full trade. Calculating smaller trade...")
             available_myriad_capital = max(0, myriad_usdc_balance - CAPITAL_SAFETY_BUFFER_USD)
             available_poly_capital = max(0, poly_usdc_balance - CAPITAL_SAFETY_BUFFER_USD)
-            q1_i_myr, q2_i_myr = (amm['myriad_q1'], amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q2'], amm['myriad_q1'])
+            q1_i_myr, q2_i_myr = (amm['myriad_q1'], amm['myriad_q2']) if plan['myriad_side_to_buy'] == 1 else (amm['myriad_q2'], amm['myriad_q1'])
             max_shares_myriad = myriad_model.solve_shares_for_cost(q1_i_myr, q2_i_myr, myriad_b, available_myriad_capital, market_fee)
-            max_shares_poly = (available_poly_capital / trade_plan['polymarket_limit_price']) if trade_plan['polymarket_limit_price'] > 0 else 0
+            max_shares_poly = (available_poly_capital / plan['polymarket_limit_price']) if plan['polymarket_limit_price'] > 0 else 0
             resized_shares = math.floor(min(max_shares_myriad, max_shares_poly))
             if resized_shares < 1: raise ValueError(f"Capital-constrained calculation resulted in < 1 share.")
-            trade_plan.update({'myriad_shares_to_buy': resized_shares, 'polymarket_shares_to_buy': resized_shares})
-            trade_plan['estimated_polymarket_cost_usd'] = resized_shares * trade_plan['polymarket_limit_price']
-            q1_f_res, q2_f_res = (amm['myriad_q1'] + resized_shares, amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + resized_shares)
-            trade_plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_res, q2_f_res, myriad_b) - initial_cost) * (1 + market_fee)
-            if (resized_shares - (trade_plan['estimated_myriad_cost_usd'] + trade_plan['estimated_polymarket_cost_usd'])) < MIN_PROFIT_USD:
+            plan.update({'myriad_shares_to_buy': resized_shares, 'polymarket_shares_to_buy': resized_shares})
+            plan['estimated_polymarket_cost_usd'] = resized_shares * plan['polymarket_limit_price']
+            q1_f_res, q2_f_res = (amm['myriad_q1'] + resized_shares, amm['myriad_q2']) if plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + resized_shares)
+            plan['estimated_myriad_cost_usd'] = (myriad_model.lmsr_cost(q1_f_res, q2_f_res, myriad_b) - initial_cost) * (1 + market_fee)
+            if (resized_shares - (plan['estimated_myriad_cost_usd'] + plan['estimated_polymarket_cost_usd'])) < MIN_PROFIT_USD:
                  raise ValueError(f"Resized trade profit is below minimum.")
             log.info(f"REVISED Plan: Buy {resized_shares} shares on both platforms.")
-            opp['trade_plan'] = trade_plan
+            opp['trade_plan'] = plan
         
-        if poly_usdc_balance < trade_plan['estimated_polymarket_cost_usd']: raise ValueError(f"Insufficient USDC on Polygon.")
-        if myriad_usdc_balance < trade_plan['estimated_myriad_cost_usd']: raise ValueError(f"Insufficient USDC on Myriad.")
+        if poly_usdc_balance < plan['estimated_polymarket_cost_usd']: raise ValueError(f"Insufficient USDC on Polygon.")
+        if myriad_usdc_balance < plan['estimated_myriad_cost_usd']: raise ValueError(f"Insufficient USDC on Myriad.")
         log.info("✅ All Pre-flight checks passed.")
-        trade_log.update({'planned_poly_shares': trade_plan['polymarket_shares_to_buy'], 'planned_myriad_shares': trade_plan['myriad_shares_to_buy']})
+        trade_log.update({'planned_poly_shares': plan['polymarket_shares_to_buy'], 'planned_myriad_shares': plan['myriad_shares_to_buy']})
 
         # STEP 2: LEG 1 EXECUTION (POLYMARKET)
         log.info("--- Executing Leg 1 (Polymarket) ---")
@@ -515,9 +589,9 @@ def process_opportunity(opp: dict):
         existing_trade_ids = {t['id'] for t in clob_client.get_trades()} if EXECUTION_MODE != "DRY_RUN" else set()
         
         if EXECUTION_MODE == "DRY_RUN":
-            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(trade_plan['polymarket_shares_to_buy'])}}
+            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_buy'])}}
         else:
-            poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], trade_plan['polymarket_limit_price'], trade_plan['polymarket_shares_to_buy'])
+            poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], plan['polymarket_limit_price'], plan['polymarket_shares_to_buy'])
         
         if not poly_result.get('success'): raise RuntimeError(f"Failed Leg 1 (Poly): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")
         
@@ -527,21 +601,22 @@ def process_opportunity(opp: dict):
         order_id = fak_response.get('orderID')
 
         if EXECUTION_MODE != "DRY_RUN" and order_id:
-            log.info(f"[POLY] Order {order_id} submitted. Waiting 5s to find trade details...")
-            time.sleep(5)
-            all_my_trades_after = clob_client.get_trades()
+            # --- MODIFICATION: Use fast polling instead of static sleep ---
+            all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
             db.save_poly_trades(all_my_trades_after)
-            new_trade = next((t for t in all_my_trades_after if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id), None)
-            if new_trade:
-                log.info(f"[POLY] Found new trade: {new_trade['id']}")
-                for mo in new_trade.get('maker_orders', []):
-                    executed_poly_shares += float(mo.get('matched_amount', '0'))
-                    executed_poly_cost_usd += float(mo.get('matched_amount', '0')) * float(mo.get('price', '0'))
-                trade_info_json = json.dumps(new_trade)
-            else: log.error(f"[POLY] CRITICAL: Could not find trade details for order {order_id}.")
+
+            if new_trades:
+                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for buy order {order_id}")
+                for trade in new_trades:
+                    for mo in trade.get('maker_orders', []):
+                        executed_poly_shares += float(mo.get('matched_amount', '0'))
+                        executed_poly_cost_usd += float(mo.get('matched_amount', '0')) * float(mo.get('price', '0'))
+                trade_info_json = json.dumps(new_trades)
+            else: 
+                log.error(f"[POLY] CRITICAL: Could not find trade details for order {order_id}.")
         else:
             executed_poly_shares = float(fak_response.get('takingAmount', '0'))
-            executed_poly_cost_usd = executed_poly_shares * trade_plan['polymarket_limit_price']
+            executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
             
         if executed_poly_shares <= 0: raise RuntimeError("Leg 1 (Poly) executed but no shares acquired.")
         log.info(f"✅ Leg 1 SUCCESS: Acquired {executed_poly_shares:.4f} shares for ${executed_poly_cost_usd:.4f} on Polymarket.")
@@ -549,19 +624,19 @@ def process_opportunity(opp: dict):
 
         # STEP 3: LEG 2 EXECUTION (MYRIAD)
         log.info("--- Executing Leg 2 (Myriad) ---")
-        q1_f_final, q2_f_final = (amm['myriad_q1'] + executed_poly_shares, amm['myriad_q2']) if trade_plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + executed_poly_shares)
+        q1_f_final, q2_f_final = (amm['myriad_q1'] + executed_poly_shares, amm['myriad_q2']) if plan['myriad_side_to_buy'] == 1 else (amm['myriad_q1'], amm['myriad_q2'] + executed_poly_shares)
         final_myriad_cost = (myriad_model.lmsr_cost(q1_f_final, q2_f_final, myriad_b) - initial_cost) * (1 + market_fee)
         if get_abstract_usdc_balance() < final_myriad_cost: raise RuntimeError(f"Insufficient capital for Leg 2.")
 
         if EXECUTION_MODE == "DRY_RUN":
             myriad_result = {'success': True, 'tx_hash': 'dry_run_hash'}
         else:
-            myriad_result = execute_myriad_buy(opp['market_identifiers']['myriad_market_id'], trade_plan['myriad_side_to_buy'] - 1, final_myriad_cost)
+            myriad_result = execute_myriad_buy(opp['market_identifiers']['myriad_market_id'], plan['myriad_side_to_buy'] - 1, final_myriad_cost)
         
         if not myriad_result.get('success'): raise RuntimeError(f"Failed Leg 2 (Myriad): {myriad_result.get('error')}")
 
         log.info("✅ Both legs executed successfully!")
-        trade_log.update({'status': 'SUCCESS', 'status_message': 'Both legs executed. Awaiting Myriad API confirmation.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': opp['profitability_metrics']['estimated_profit_usd']})
+        trade_log.update({'status': 'SUCCESS', 'status_message': 'Both legs executed. Awaiting Myriad API confirmation.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': reval_profit}) # Use revalidated profit
         db.log_trade_attempt(trade_log)
 
         threading.Thread(target=find_myriad_trade_details, args=(opp['market_identifiers']['myriad_market_id'], final_myriad_cost, myriad_account.address, trade_id, market_title)).start()
