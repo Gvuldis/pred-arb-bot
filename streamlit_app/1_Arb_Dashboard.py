@@ -84,6 +84,12 @@ def get_all_bodegas():
 def get_all_myriads():
     return m_client.fetch_markets()
 
+@st.cache_data(ttl=600)
+def get_poly_market_details(condition_id):
+    """Cached function to fetch Polymarket market details."""
+    log.info(f"Fetching details for Polymarket market: {condition_id}")
+    return p_client.fetch_market(condition_id)
+
 def format_deadline_ms(ms_timestamp):
     if not ms_timestamp or not isinstance(ms_timestamp, (int, float)): return "N/A", "N/A", 0
     try:
@@ -116,7 +122,7 @@ st.subheader("🗓 Event End Date Calendars")
 all_bodegas_for_calendar = get_all_bodegas()
 bodega_map = {m['id']: {'name': m['name'], 'deadline': m['deadline']} for m in all_bodegas_for_calendar}
 all_myriads_for_calendar = get_all_myriads()
-myriad_map = {m['slug']: {'name': m['title'], 'expires_at': m['expires_at']} for m in all_myriads_for_calendar}
+myriad_map = {m['slug']: m for m in all_myriads_for_calendar}
 
 cal_bodega, cal_myriad = st.tabs(["Bodega Calendar", "Myriad Calendar"])
 
@@ -162,7 +168,7 @@ with cal_myriad:
                 if m_slug in myriad_map:
                     market_info = myriad_map[m_slug]
                     deadline_str, remaining_str, deadline_ts = format_deadline_iso(market_info.get('expires_at'))
-                    matched_markets.append({ "deadline_ts": deadline_ts, "Market Name": market_info.get('name', 'N/A'), "End Date": deadline_str, "Time Remaining": remaining_str, "Myriad Slug": m_slug, "Polymarket ID": p_id })
+                    matched_markets.append({ "deadline_ts": deadline_ts, "Market Name": market_info.get('title', 'N/A'), "End Date": deadline_str, "Time Remaining": remaining_str, "Myriad Slug": m_slug, "Polymarket ID": p_id })
             if not matched_markets:
                 st.info("Could not find deadline info for any matched pairs (they may be inactive).")
             else:
@@ -324,25 +330,54 @@ with tab_myriad:
     if manual_pairs_myriad:
         with st.expander("📝 Edit Saved Myriad Pairs"):
             sorted_pairs_myriad = sorted(
-                [(f"{myriad_map.get(m_slug, {'name': 'Unknown'})['name']} ({m_slug})", m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe)
+                [(f"{myriad_map.get(m_slug, {'title': 'Unknown'})['title']} ({m_slug})", m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe)
                  for m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in manual_pairs_myriad],
                 key=lambda x: x[0]
             )
 
             for display_name, m_slug, p_id, is_flipped, profit_threshold, end_date_override, is_autotrade_safe in sorted_pairs_myriad:
-                st.markdown(f"**{display_name}**")
+                myriad_details = myriad_map.get(m_slug)
+                poly_details = get_poly_market_details(p_id)
                 
-                m_url = f"https://app.myriad.social/markets/{m_slug}"
-                p_url = f"https://polymarket.com/event/{p_id}"
+                myriad_title = myriad_details.get('title', 'Unknown Myriad Market') if myriad_details else f'Unknown ({m_slug})'
+                poly_title = poly_details.get('question', 'Unknown Polymarket Market') if poly_details else f'Unknown ({p_id})'
                 
-                c1_disp_m, c2_disp_m = st.columns([12,1])
-                with c1_disp_m:
-                    st.markdown(f"• [Myriad Link]({m_url}) ↔ [Polymarket Link]({p_url})")
-                with c2_disp_m:
+                st.markdown(f"**{myriad_title}**")
+                
+                col_links, col_del = st.columns([10, 1])
+                with col_links:
+                    m_url = f"https://app.myriad.social/markets/{m_slug}"
+                    p_url = f"https://polymarket.com/event/{p_id}"
+                    st.markdown(f"↔️ **Paired with:** *{poly_title}*")
+                    st.markdown(f"🔗 [Myriad Link]({m_url}) / [Polymarket Link]({p_url})")
+                with col_del:
+                    st.write("") # Spacer for alignment
                     if st.button("❌", key=f"del_pair_myriad_{m_slug}_{p_id}", help="Delete this pair"):
                         delete_manual_pair_myriad(m_slug, p_id)
                         st.rerun()
 
+                with st.expander("View Full Market Details & Outcomes"):
+                    d_col1, d_col2 = st.columns(2)
+                    with d_col1:
+                        st.markdown("**Myriad Market Info**")
+                        if myriad_details:
+                            outcomes = myriad_details.get('outcomes', [])
+                            if outcomes and len(outcomes) == 2:
+                                st.markdown(f"- **Outcome 0:** `{outcomes[0].get('title', 'N/A')}`")
+                                st.markdown(f"- **Outcome 1:** `{outcomes[1].get('title', 'N/A')}`")
+                            st.markdown(f"**Description:**")
+                            st.markdown(myriad_details.get('description', 'No description provided.'), unsafe_allow_html=True)
+                        else:
+                            st.warning("Could not load Myriad market details.")
+                    with d_col2:
+                        st.markdown("**Polymarket Market Info**")
+                        if poly_details:
+                            st.markdown(f"- **'Yes' Outcome:** `{poly_details.get('outcome_yes', 'N/A')}`")
+                            st.markdown(f"- **'No' Outcome:** `{poly_details.get('outcome_no', 'N/A')}`")
+                            st.caption(f"Note: Some Polymarket markets use different outcome names besides 'Yes'/'No'.")
+                        else:
+                            st.warning("Could not load Polymarket market details.")
+                
                 with st.form(key=f"form_pair_myriad_{m_slug}_{p_id}"):
                     default_date, default_time = None, None
                     api_date_str = myriad_map.get(m_slug, {}).get('expires_at')
@@ -372,7 +407,6 @@ with tab_myriad:
                         save_manual_pair_myriad(m_slug, p_id, int(is_flipped_new), float(new_threshold), new_override_ts, int(is_autotrade_safe_new))
                         st.success(f"Pair {m_slug}/{p_id} updated."); time.sleep(1); st.rerun()
                 st.markdown("---")
-
 
     st.subheader("🆕 Pending New Myriad Markets")
     pending_myriad = load_new_myriad_markets()
