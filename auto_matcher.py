@@ -1,3 +1,4 @@
+# auto_matcher.py
 import logging
 import uuid
 import json
@@ -303,7 +304,9 @@ def run_myriad_arb_check(pairs_to_check: list):
 
                     if paired_position:
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
-                        shares_to_sell = min_shares - 0.5
+                        
+                        # --- YOUR NEW RULE: Only propose selling 80% of the available position ---
+                        shares_to_sell = (min_shares - 0.5) * 0.8
                         
                         if shares_to_sell < 1.0:
                             continue

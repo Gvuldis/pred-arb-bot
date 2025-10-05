@@ -1,3 +1,4 @@
+# arb_executor.py
 import os
 import math
 import logging
@@ -343,11 +344,11 @@ def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, 
     try:
         market_contract = w3_abs.eth.contract(address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS), abi=MYRIAD_MARKET_ABI)
         
-        # <<< FIX FOR SLIPPAGE ISSUE >>>
-        # The `maxSharesToSell` parameter is a slippage guard. We increase it slightly (e.g., by 1%)
-        # to allow for minor price movements between calculation and execution.
-        # This prevents the "maximum sell amount exceeded" revert.
-        shares_with_slippage = shares_to_sell * 1.2
+        # <<< FIX: REDUCED SLIPPAGE TOLERANCE FROM 20% to 10% >>>
+        # The `maxSharesToSell` parameter is a slippage guard. A 20% buffer was too high,
+        # causing pre-flight `estimate_gas` checks to fail if the wallet balance was close to the trade size.
+        # Reducing this to 10% is safer.
+        shares_with_slippage = shares_to_sell * 1.1
         
         # Both shares and USDC are scaled by 1e6 on Myriad's contract
         shares_wei = int(shares_with_slippage * (10**6))
