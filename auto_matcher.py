@@ -5,7 +5,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timezone, timedelta
 import requests
 import math
-import numpy as np
+# import numpy as np  <- REMOVED NUMPY ENTIRELY
 import time
 
 from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
@@ -488,12 +488,10 @@ def setup_market_check_jobs(scheduler, platform: str):
         all_pairs = load_manual_pairs_myriad()
         market_data = {m['slug']: m for m in load_myriad_markets()}
         check_function = run_myriad_arb_check
-        key_field = 'slug'
     elif platform_lower == 'bodega':
         all_pairs = load_manual_pairs()
         market_data = {m['id']: m for m in b_client.fetch_markets(force_refresh=True)}
         check_function = run_bodega_arb_check
-        key_field = 'id'
     else:
         return
 
@@ -553,15 +551,15 @@ def setup_market_check_jobs(scheduler, platform: str):
             log.error(f"Invalid config for {platform.upper()} {tier_name}. Skipping.")
             continue
 
-        pair_segments = np.array_split(pairs, segments)
+        # --- REPLACED NUMPY WITH PLAIN PYTHON FOR SEGMENTATION ---
+        pair_segments = [pairs[i::segments] for i in range(segments)]
         stagger_delay = interval / segments
 
-        for i, segment in enumerate(pair_segments):
-            if not segment.any():
+        for i, segment_list in enumerate(pair_segments):
+            if not segment_list:
                 continue
 
             job_id = f"{platform_lower}_arb_check_job_{tier_name}_segment_{i}"
-            segment_list = [tuple(row) for row in segment]
             
             scheduler.add_job(
                 check_function, "interval", seconds=interval, id=job_id, args=[segment_list],
