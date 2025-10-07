@@ -1,4 +1,3 @@
-# auto_matcher.py
 import logging
 import uuid
 import json
@@ -305,10 +304,17 @@ def run_myriad_arb_check(pairs_to_check: list):
                     if paired_position:
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
                         
-                        # --- YOUR NEW RULE: Only propose selling 80% of the available position ---
-                        shares_to_sell = (min_shares - 0.5) * 0.8
+                        # --- NEW RULE: Do not process sells for small positions ---
+                        if min_shares < 10:
+                            log.info(f"Skipping SELL check for {m_slug}. Position size ({min_shares:.2f}) is below the 10 share threshold.")
+                            continue
+                        
+                        # --- NEW RULE: Only propose selling 90% of the available matched position ---
+                        # The -0.5 is a small buffer to account for any minor dust/rounding differences.
+                        shares_to_sell = (min_shares - 0.5) * 0.9
                         
                         if shares_to_sell < 1.0:
+                            log.info(f"Skipping SELL check for {m_slug}. Calculated sell amount ({shares_to_sell:.2f}) is less than 1.")
                             continue
                         
                         m_prices = m_client.parse_realtime_prices(m_data)

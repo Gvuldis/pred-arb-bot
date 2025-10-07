@@ -1,4 +1,3 @@
-# arb_executor.py
 import os
 import math
 import logging
@@ -344,17 +343,14 @@ def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, 
     try:
         market_contract = w3_abs.eth.contract(address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS), abi=MYRIAD_MARKET_ABI)
         
-        # <<< FIX: REDUCED SLIPPAGE TOLERANCE FROM 20% to 10% >>>
-        # The `maxSharesToSell` parameter is a slippage guard. A 20% buffer was too high,
-        # causing pre-flight `estimate_gas` checks to fail if the wallet balance was close to the trade size.
-        # Reducing this to 10% is safer.
-        shares_with_slippage = shares_to_sell * 1.1
+        # <<< CHANGE: SLIPPAGE TOLERANCE INCREASED TO 5% as per user request >>>
+        shares_with_slippage = shares_to_sell * 1.05
         
         # Both shares and USDC are scaled by 1e6 on Myriad's contract
         shares_wei = int(shares_with_slippage * (10**6))
         usdc_wei = int(min_usdc_receive * (10**6))
 
-        log.info(f"[MYRIAD] Building sell transaction with shares_wei={shares_wei} (includes 10% slippage tolerance), usdc_wei={usdc_wei}")
+        log.info(f"[MYRIAD] Building sell transaction with shares_wei={shares_wei} (includes 5% slippage tolerance), usdc_wei={usdc_wei}")
         nonce = w3_abs.eth.get_transaction_count(myriad_account.address)
         gas_price = w3_abs.eth.gas_price
         
@@ -482,36 +478,63 @@ def process_sell_opportunity(opp: dict):
         log.info(f"✅ Leg 1 (Poly SELL) SUCCESS: Sold {executed_poly_shares_sold:.4f} shares for ${executed_poly_revenue_usd:.4f} on Polymarket.")
         trade_log.update({'executed_poly_shares': executed_poly_shares_sold, 'executed_poly_cost_usd': -executed_poly_revenue_usd, 'poly_tx_hash': trade_info_json})
 
-        # LEG 2: MYRIAD SELL
+        # LEG 2: MYRIAD SELL (WITH RETRY LOGIC)
         log.info(f"--- Executing Leg 2 (Myriad SELL) ---")
         final_myriad_shares_to_sell = executed_poly_shares_sold
-        final_min_usdc_receive, recalculated_myr_revenue = 0.0, 0.0
+        myriad_result = None
+        recalculated_myr_revenue = 0.0
 
-        if 'amm_parameters' in opp:
-            amm = opp['amm_parameters']
-            q1, q2, b = amm['myriad_q1'], amm['myriad_q2'], amm['myriad_liquidity']
-            myriad_outcome_id_sell = plan['myriad_outcome_id_sell']
-            q_sell, q_other = (q1, q2) if myriad_outcome_id_sell == 0 else (q2, q1)
-            recalculated_myr_revenue = myriad_model.calculate_sell_revenue(q_sell, q_other, b, final_myriad_shares_to_sell)
-            final_min_usdc_receive = recalculated_myr_revenue * 1
-            log.info(f"[MYRIAD] Recalculated minimum USDC receive for {final_myriad_shares_to_sell:.4f} shares: ${final_min_usdc_receive:.4f}")
-        else:
-            original_shares = plan['myriad_shares_to_sell']
-            original_min_usd = plan['myriad_min_usd_receive']
-            if original_shares > 0:
-                scaling_factor = final_myriad_shares_to_sell / original_shares
-                final_min_usdc_receive = original_min_usd * scaling_factor
-                recalculated_myr_revenue = final_min_usdc_receive / 1
-                log.warning(f"[MYRIAD] amm_parameters missing. Using linear scaling for min USDC receive: ${final_min_usdc_receive:.4f}")
-            else:
-                raise RuntimeError("Cannot determine min USDC receive for Myriad sell.")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Fetching live market data for sell calculation...")
+                live_m_data = m_client.fetch_market_details(myriad_slug)
+                if not live_m_data:
+                    raise RuntimeError("Failed to fetch live Myriad data for retry.")
+                
+                live_m_prices = m_client.parse_realtime_prices(live_m_data)
+                if not live_m_prices:
+                    raise RuntimeError("Failed to parse live Myriad prices for retry.")
+
+                q1, q2, b = live_m_prices['shares1'], live_m_prices['shares2'], live_m_prices['liquidity']
+                myriad_outcome_id_sell = plan['myriad_outcome_id_sell']
+                q_sell, q_other = (q1, q2) if myriad_outcome_id_sell == 0 else (q2, q1)
+
+                recalculated_myr_revenue = myriad_model.calculate_sell_revenue(q_sell, q_other, b, final_myriad_shares_to_sell)
+                # Use a 1% safety margin for the minimum receive amount
+                final_min_usdc_receive = recalculated_myr_revenue * 0.99
+                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Recalculated minimum USDC receive: ${final_min_usdc_receive:.4f}")
+
+                if EXECUTION_MODE == "DRY_RUN":
+                    myriad_result = {'success': True, 'tx_hash': 'dry_run_hash_sell'}
+                else:
+                    myriad_result = execute_myriad_sell(
+                        opp['market_identifiers']['myriad_market_id'], 
+                        plan['myriad_outcome_id_sell'], 
+                        final_myriad_shares_to_sell, 
+                        final_min_usdc_receive
+                    )
+                
+                if not myriad_result.get('success'):
+                    # Raise an error to be caught by the outer except block for this attempt
+                    raise RuntimeError(myriad_result.get('error'))
+
+                # If we reach here, the transaction was successful
+                log.info(f"✅ Myriad sell successful on attempt {attempt + 1}.")
+                break  # Exit the retry loop
+
+            except Exception as e:
+                log.error(f"[MYRIAD] Sell attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5)  # Wait before the next attempt
+                else:
+                    # If all retries fail, raise the final error to trigger the main panic block
+                    raise RuntimeError(f"Failed Leg 2 (Myriad SELL) after {max_retries} attempts: {e}")
         
-        if EXECUTION_MODE == "DRY_RUN":
-            myriad_result = {'success': True, 'tx_hash': 'dry_run_hash_sell'}
-        else:
-            myriad_result = execute_myriad_sell(opp['market_identifiers']['myriad_market_id'], plan['myriad_outcome_id_sell'], final_myriad_shares_to_sell, final_min_usdc_receive)
-        if not myriad_result.get('success'):
-            raise RuntimeError(f"Failed Leg 2 (Myriad SELL): {myriad_result.get('error')}")
+        # This check is crucial. If the loop finished without success, myriad_result will be None or failed.
+        if not myriad_result or not myriad_result.get('success'):
+            # This line ensures the outer exception handler catches the failure properly.
+            raise RuntimeError("Failed Leg 2 (Myriad SELL): All retry attempts failed.")
 
         log.info("✅ Both SELL legs executed successfully!")
         final_profit = (executed_poly_revenue_usd + recalculated_myr_revenue) - executed_poly_shares_sold
