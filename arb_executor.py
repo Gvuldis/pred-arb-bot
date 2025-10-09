@@ -171,7 +171,7 @@ def find_myriad_trade_details(market_id: int, expected_cost: float, myriad_addre
         )
 
 # --- NEW HELPER FUNCTION FOR EFFICIENT POLLING ---
-def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, existing_trade_ids: set, max_attempts: int = 10, sleep_interval: int = 1):
+def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, existing_trade_ids: set, max_attempts: int = 20, sleep_interval: int = 1):
     """
     Polls the get_trades endpoint to find new trades for a given order ID.
     
@@ -449,15 +449,18 @@ def process_sell_opportunity(opp: dict):
         executed_poly_shares_sold, executed_poly_revenue_usd = 0.0, 0.0
         trade_info_json = json.dumps(fak_response)
         order_id = fak_response.get('orderID')
+        status = fak_response.get('status')
 
-        if EXECUTION_MODE != "DRY_RUN" and order_id:
-            log.info(f"[POLY] Sell Order {order_id} submitted (status: {fak_response.get('status')}).")
-            # --- MODIFICATION: Use fast polling instead of static sleep ---
+        if EXECUTION_MODE != "DRY_RUN" and status == 'matched':
+            log.info(f"[POLY] Sell Order {order_id} was matched instantly. Using details from FAK response.")
+            executed_poly_shares_sold = float(fak_response.get('takingAmount', '0'))
+            executed_poly_revenue_usd = float(fak_response.get('makingAmount', '0'))
+        elif EXECUTION_MODE != "DRY_RUN" and order_id:
+            log.info(f"[POLY] Sell Order {order_id} has status '{status}'. Polling for trade details...")
             all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
             db.save_poly_trades(all_my_trades_after)
-
             if new_trades:
-                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for sell order {order_id}")
+                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for sell order {order_id} via polling.")
                 for trade in new_trades:
                     for mo in trade.get('maker_orders', []):
                         matched_amount = float(mo.get('matched_amount', '0'))
@@ -466,8 +469,8 @@ def process_sell_opportunity(opp: dict):
                         executed_poly_revenue_usd += matched_amount * price
                 trade_info_json = json.dumps(new_trades)
             else:
-                log.error(f"[POLY] CRITICAL: Could not find trade details for sell order {order_id}.")
-        else:
+                log.error(f"[POLY] CRITICAL: Could not find trade details for sell order {order_id} via polling.")
+        else: # DRY_RUN
             executed_poly_shares_sold = float(fak_response.get('takingAmount', '0'))
             executed_poly_revenue_usd = float(fak_response.get('makingAmount', '0'))
             if executed_poly_revenue_usd == 0 and executed_poly_shares_sold > 0:
@@ -679,22 +682,29 @@ def process_opportunity(opp: dict):
         executed_poly_shares, executed_poly_cost_usd = 0.0, 0.0
         trade_info_json = json.dumps(fak_response)
         order_id = fak_response.get('orderID')
+        status = fak_response.get('status')
 
-        if EXECUTION_MODE != "DRY_RUN" and order_id:
-            # --- MODIFICATION: Use fast polling instead of static sleep ---
+        if EXECUTION_MODE != "DRY_RUN" and status == 'matched':
+            log.info(f"[POLY] Order {order_id} was matched instantly. Using details from FAK response.")
+            executed_poly_shares = float(fak_response.get('takingAmount', '0'))
+            executed_poly_cost_usd = float(fak_response.get('makingAmount', '0'))
+            if executed_poly_cost_usd == 0 and executed_poly_shares > 0:
+                log.warning("[POLY] 'makingAmount' was zero for a matched order. Calculating cost from limit price.")
+                executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
+        elif EXECUTION_MODE != "DRY_RUN" and order_id:
+            log.info(f"[POLY] Order {order_id} has status '{status}'. Polling for trade details...")
             all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
             db.save_poly_trades(all_my_trades_after)
-
             if new_trades:
-                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for buy order {order_id}")
+                log.info(f"[POLY] Found {len(new_trades)} new trade(s) for buy order {order_id} via polling.")
                 for trade in new_trades:
                     for mo in trade.get('maker_orders', []):
                         executed_poly_shares += float(mo.get('matched_amount', '0'))
                         executed_poly_cost_usd += float(mo.get('matched_amount', '0')) * float(mo.get('price', '0'))
                 trade_info_json = json.dumps(new_trades)
             else: 
-                log.error(f"[POLY] CRITICAL: Could not find trade details for order {order_id}.")
-        else:
+                log.error(f"[POLY] CRITICAL: Could not find trade details for order {order_id} via polling.")
+        else: # DRY_RUN case
             executed_poly_shares = float(fak_response.get('takingAmount', '0'))
             executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
             
