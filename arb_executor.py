@@ -32,6 +32,7 @@ load_dotenv()
 EXECUTION_MODE = "LIMITED_LIVE"
 LIMITED_LIVE_CAP_USD = float(os.getenv("LIMITED_LIVE_CAP_USD", "10.0"))
 MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "10.00"))
+MIN_PROFIT_USD_SELL = float(os.getenv("MIN_PROFIT_USD_SELL", "5.00")) # Minimum profit to close a position
 MIN_ROI = float(os.getenv("MIN_ROI", "0.05"))
 MIN_APY = float(os.getenv("MIN_APY", "5"))
 
@@ -388,54 +389,94 @@ def process_sell_opportunity(opp: dict):
     market_key = f"myriad_{myriad_slug}_sell" # Use a separate cooldown key for sells
 
     try:
+        # <<< START OF FIX: ADD FINAL CONFIRMATION CHECK FOR SELLS >>>
+        log.info(f"[{trade_id}] Performing final confirmation check for SELL...")
+        
+        m_data_live = m_client.fetch_market_details(myriad_slug)
+        p_data_live = p_client.fetch_market(poly_id)
+        
+        if not m_data_live or not p_data_live:
+            raise ValueError("Could not fetch live data for SELL re-validation.")
+
+        plan = opp['trade_plan']
+        shares_to_sell = plan['polymarket_shares_to_sell']
+        market_fee = opp['market_details']['market_fee']
+        
+        # Re-calculate Myriad revenue
+        m_prices_live = m_client.parse_realtime_prices(m_data_live)
+        if not m_prices_live:
+             raise ValueError("Could not parse live Myriad prices for SELL re-validation.")
+        q1_live, q2_live, b_live = m_prices_live['shares1'], m_prices_live['shares2'], m_prices_live['liquidity']
+        q_sell_live, q_other_live = (q1_live, q2_live) if plan['myriad_outcome_id_sell'] == 0 else (q2_live, q1_live)
+        reval_myriad_revenue = myriad_model.calculate_sell_revenue(q_sell_live, q_other_live, b_live, shares_to_sell, market_fee)
+
+        # Re-calculate Polymarket revenue
+        poly_token_id_sell = opp['market_identifiers']['polymarket_token_id_sell']
+        poly_bids_book_live = []
+        if poly_token_id_sell == p_data_live.get('token_id_yes'):
+            poly_bids_book_live = p_data_live.get('order_book_yes_bids', [])
+        elif poly_token_id_sell == p_data_live.get('token_id_no'):
+            poly_bids_book_live = p_data_live.get('order_book_no_bids', [])
+
+        if not poly_bids_book_live:
+             raise ValueError("Could not get live Polymarket bids book for SELL re-validation.")
+        
+        _, reval_poly_revenue, _ = consume_order_book(poly_bids_book_live, shares_to_sell)
+        
+        # Re-calculate final profit
+        reval_total_revenue = reval_myriad_revenue + reval_poly_revenue
+        reval_profit = reval_total_revenue - shares_to_sell
+        
+        original_profit = opp['profitability_metrics']['estimated_profit_usd']
+        log.info(f"[{trade_id}] SELL Re-validation results: Profit=${reval_profit:.2f} (Original: ${original_profit:.2f})")
+
+        if reval_profit < MIN_PROFIT_USD_SELL:
+            log.warning(f"[{trade_id}] Stale SELL opportunity. Profitability dropped below threshold of ${MIN_PROFIT_USD_SELL:.2f}. Discarding trade.")
+            return # Exit the function, do not trade
+        
+        log.info(f"[{trade_id}] ✅ Final confirmation for SELL passed. Proceeding with trade.")
+        # <<< END OF FIX >>>
+
         # STEP 1: PRE-FLIGHT CHECKS
         log.info("--- Performing pre-flight checks for SELL ---")
         if get_abstract_eth_balance() < MIN_ETH_BALANCE: raise ValueError(f"Insufficient gas on Myriad for sell.")
         last_trade_ts = db.get_market_cooldown(market_key)
         if last_trade_ts and datetime.now(timezone.utc) < (datetime.fromisoformat(last_trade_ts) + timedelta(minutes=TRADE_COOLDOWN_MINUTES)): raise ValueError(f"Market is on sell cooldown.")
         
-        m_data = m_client.fetch_market_details(myriad_slug)
-        p_data = p_client.fetch_market(poly_id)
-        if not m_data or m_data.get('state') != 'open' or not p_data or not p_data.get('active'):
+        if not m_data_live.get('state') == 'open' or not p_data_live.get('active'):
             raise ValueError("One of the markets is no longer active.")
 
-        # --- NEW POSITION CHECK ---
+        # --- POSITION CHECK ---
         log.info(f"[{trade_id}] Checking Polymarket position for condition ID {poly_id}...")
         all_poly_positions = get_polymarket_positions()
         market_positions = all_poly_positions.get(poly_id, {})
         
-        token_to_sell = opp['market_identifiers']['polymarket_token_id_sell']
-        shares_to_sell = opp['trade_plan']['polymarket_shares_to_sell']
         outcome_name_to_sell = None
-        
-        # Determine which outcome name corresponds to the token we're selling
-        if p_data.get('token_id_yes') and token_to_sell == p_data.get('token_id_yes'):
-            outcome_name_to_sell = p_data.get('outcome_yes')
-        elif p_data.get('token_id_no') and token_to_sell == p_data.get('token_id_no'):
-            outcome_name_to_sell = p_data.get('outcome_no')
+        if poly_token_id_sell == p_data_live.get('token_id_yes'):
+            outcome_name_to_sell = p_data_live.get('outcome_yes')
+        elif poly_token_id_sell == p_data_live.get('token_id_no'):
+            outcome_name_to_sell = p_data_live.get('outcome_no')
         
         if not outcome_name_to_sell:
-            raise ValueError(f"Could not map token ID {token_to_sell} to an outcome for condition ID {poly_id}.")
+            raise ValueError(f"Could not map token ID {poly_token_id_sell} to an outcome for condition ID {poly_id}.")
             
         current_balance = market_positions.get(outcome_name_to_sell, 0.0)
         log.info(f"[{trade_id}] Plan is to sell {shares_to_sell:.4f} of '{outcome_name_to_sell}'. Current balance: {current_balance:.4f} shares.")
         
         if current_balance < shares_to_sell:
             raise ValueError(f"Insufficient Polymarket balance. Have {current_balance:.4f}, need {shares_to_sell:.4f}.")
-        # --- END NEW POSITION CHECK ---
         
         log.info("✅ All Pre-flight checks for SELL passed.")
 
         # STEP 2: EXECUTE SELLS
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
-        plan = opp['trade_plan']
 
         # LEG 1: POLYMARKET SELL
         log.info(f"--- Executing Leg 1 (Polymarket SELL) ---")
         existing_trade_ids = {t['id'] for t in clob_client.get_trades()}
         
         poly_result = execute_polymarket_sell(
-            opp['market_identifiers']['polymarket_token_id_sell'],
+            poly_token_id_sell,
             plan['polymarket_limit_price'],
             plan['polymarket_shares_to_sell']
         )
@@ -450,7 +491,6 @@ def process_sell_opportunity(opp: dict):
 
         if status == 'matched':
             log.info(f"[POLY] Sell Order {order_id} was matched instantly. Using details from FAK response.")
-            # --- FIX: For a SELL order, makingAmount is shares and takingAmount is USDC received. ---
             executed_poly_shares_sold = float(fak_response.get('makingAmount', '0'))
             executed_poly_revenue_usd = float(fak_response.get('takingAmount', '0'))
         elif order_id:
@@ -468,7 +508,7 @@ def process_sell_opportunity(opp: dict):
                 trade_info_json = json.dumps(new_trades)
             else:
                 log.error(f"[POLY] CRITICAL: Could not find trade details for sell order {order_id} via polling.")
-        else: # This case is unlikely but a good safeguard
+        else:
             log.error(f"[POLY] CRITICAL: FAK sell response was successful but had no orderID and was not 'matched'. Response: {fak_response}")
 
         if executed_poly_shares_sold <= 0:
@@ -480,34 +520,30 @@ def process_sell_opportunity(opp: dict):
         log.info(f"--- Executing Leg 2 (Myriad SELL) ---")
         final_myriad_shares_to_sell = executed_poly_shares_sold
         myriad_result = None
-        recalculated_myr_revenue = 0.0
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Fetching live market data for sell calculation...")
-                live_m_data = m_client.fetch_market_details(myriad_slug)
-                if not live_m_data:
-                    raise RuntimeError("Failed to fetch live Myriad data for retry.")
+                # We fetch live data again here to calculate the minimum receive amount,
+                # which is a required parameter for the Myriad contract call.
+                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Fetching live market data for sell TX parameters...")
+                live_m_data_leg2 = m_client.fetch_market_details(myriad_slug)
+                if not live_m_data_leg2: raise RuntimeError("Failed to fetch live Myriad data for Leg 2.")
                 
-                market_fee = live_m_data.get('fee')
-                if market_fee is None:
-                    raise RuntimeError("Could not get market fee from live Myriad data for retry.")
+                market_fee_leg2 = live_m_data_leg2.get('fee')
+                if market_fee_leg2 is None: raise RuntimeError("Could not get market fee for Leg 2.")
 
-                live_m_prices = m_client.parse_realtime_prices(live_m_data)
-                if not live_m_prices:
-                    raise RuntimeError("Failed to parse live Myriad prices for retry.")
+                live_m_prices_leg2 = m_client.parse_realtime_prices(live_m_data_leg2)
+                if not live_m_prices_leg2: raise RuntimeError("Failed to parse live Myriad prices for Leg 2.")
 
-                q1, q2, b = live_m_prices['shares1'], live_m_prices['shares2'], live_m_prices['liquidity']
-                myriad_outcome_id_sell = plan['myriad_outcome_id_sell']
-                q_sell, q_other = (q1, q2) if myriad_outcome_id_sell == 0 else (q2, q1)
+                q1_leg2, q2_leg2, b_leg2 = live_m_prices_leg2['shares1'], live_m_prices_leg2['shares2'], live_m_prices_leg2['liquidity']
+                q_sell_leg2, q_other_leg2 = (q1_leg2, q2_leg2) if plan['myriad_outcome_id_sell'] == 0 else (q2_leg2, q1_leg2)
 
-                recalculated_myr_revenue = myriad_model.calculate_sell_revenue(
-                    q_sell, q_other, b, final_myriad_shares_to_sell, market_fee
+                myr_revenue_for_tx = myriad_model.calculate_sell_revenue(
+                    q_sell_leg2, q_other_leg2, b_leg2, final_myriad_shares_to_sell, market_fee_leg2
                 )
-                # Use a 1% safety margin for the minimum receive amount
-                final_min_usdc_receive = recalculated_myr_revenue * 0.99
-                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Recalculated minimum USDC receive: ${final_min_usdc_receive:.4f}")
+                final_min_usdc_receive = myr_revenue_for_tx * 0.99
+                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Calculated minimum USDC receive for TX: ${final_min_usdc_receive:.4f}")
 
                 myriad_result = execute_myriad_sell(
                     opp['market_identifiers']['myriad_market_id'], 
@@ -517,31 +553,26 @@ def process_sell_opportunity(opp: dict):
                 )
                 
                 if not myriad_result.get('success'):
-                    # Raise an error to be caught by the outer except block for this attempt
                     raise RuntimeError(myriad_result.get('error'))
 
-                # If we reach here, the transaction was successful
                 log.info(f"✅ Myriad sell successful on attempt {attempt + 1}.")
-                break  # Exit the retry loop
+                break
 
             except Exception as e:
                 log.error(f"[MYRIAD] Sell attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(5)  # Wait before the next attempt
+                    time.sleep(5)
                 else:
-                    # If all retries fail, raise the final error to trigger the main panic block
                     raise RuntimeError(f"Failed Leg 2 (Myriad SELL) after {max_retries} attempts: {e}")
         
-        # This check is crucial. If the loop finished without success, myriad_result will be None or failed.
         if not myriad_result or not myriad_result.get('success'):
-            # This line ensures the outer exception handler catches the failure properly.
             raise RuntimeError("Failed Leg 2 (Myriad SELL): All retry attempts failed.")
 
         log.info("✅ Both SELL legs executed successfully!")
-        final_profit = (executed_poly_revenue_usd + recalculated_myr_revenue) - executed_poly_shares_sold
-        trade_log.update({ 'status': 'SUCCESS_SELL', 'status_message': 'Both sell legs executed.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': final_profit })
+        # Use the re-validated profit for the final log and notification
+        trade_log.update({ 'status': 'SUCCESS_SELL', 'status_message': 'Both sell legs executed.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': reval_profit })
         db.log_trade_attempt(trade_log)
-        if notifier: notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], executed_poly_shares_sold, 0, 0, trade_type="SELL")
+        if notifier: notifier.notify_autotrade_success(market_title, reval_profit, executed_poly_shares_sold, 0, 0, trade_type="SELL")
 
     except (ValueError, RuntimeError) as e:
         log.error(f"SELL trade failed for {trade_id}: {e}")
@@ -568,9 +599,7 @@ def process_opportunity(opp: dict):
 
     try:
         # ======================================================================
-        # --- NEW: FINAL CONFIRMATION CHECK ---
-        # Re-fetch live data and re-calculate profit before executing.
-        # This prevents executing stale opportunities from the queue.
+        # --- FINAL CONFIRMATION CHECK ---
         # ======================================================================
         log.info(f"[{trade_id}] Performing final confirmation check...")
         
@@ -581,7 +610,6 @@ def process_opportunity(opp: dict):
         if not m_prices_live or not p_data_live:
             raise ValueError("Could not fetch live data for re-validation.")
 
-        # Re-calculate costs based on the original trade plan and LIVE data
         plan = opp['trade_plan']
         market_fee = opp['market_details']['market_fee']
         q1_live, q2_live, b_live = m_prices_live['shares1'], m_prices_live['shares2'], m_prices_live['liquidity']
@@ -769,3 +797,4 @@ def main_loop():
 if __name__ == "__main__":
     db.init_db()
     main_loop()
+
