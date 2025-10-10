@@ -495,6 +495,10 @@ def process_sell_opportunity(opp: dict):
                 if not live_m_data:
                     raise RuntimeError("Failed to fetch live Myriad data for retry.")
                 
+                market_fee = live_m_data.get('fee')
+                if market_fee is None:
+                    raise RuntimeError("Could not get market fee from live Myriad data for retry.")
+
                 live_m_prices = m_client.parse_realtime_prices(live_m_data)
                 if not live_m_prices:
                     raise RuntimeError("Failed to parse live Myriad prices for retry.")
@@ -503,7 +507,9 @@ def process_sell_opportunity(opp: dict):
                 myriad_outcome_id_sell = plan['myriad_outcome_id_sell']
                 q_sell, q_other = (q1, q2) if myriad_outcome_id_sell == 0 else (q2, q1)
 
-                recalculated_myr_revenue = myriad_model.calculate_sell_revenue(q_sell, q_other, b, final_myriad_shares_to_sell)
+                recalculated_myr_revenue = myriad_model.calculate_sell_revenue(
+                    q_sell, q_other, b, final_myriad_shares_to_sell, market_fee
+                )
                 # Use a 1% safety margin for the minimum receive amount
                 final_min_usdc_receive = recalculated_myr_revenue * 0.99
                 log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Recalculated minimum USDC receive: ${final_min_usdc_receive:.4f}")

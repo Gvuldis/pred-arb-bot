@@ -304,17 +304,13 @@ def run_myriad_arb_check(pairs_to_check: list):
                     if paired_position:
                         min_shares = min(paired_position['myr_shares'], paired_position['poly_shares'])
                         
-                        # --- NEW RULE: Do not process sells for small positions ---
                         if min_shares < 10:
                             log.info(f"Skipping SELL check for {m_slug}. Position size ({min_shares:.2f}) is below the 10 share threshold.")
                             continue
-                        
-                        # --- NEW RULE: Only propose selling 90% of the available matched position ---
-                        # The -0.5 is a small buffer to account for any minor dust/rounding differences.
-                        shares_to_sell = (min_shares - 0.5) * 0.9
-                        
-                        if shares_to_sell < 1.0:
-                            log.info(f"Skipping SELL check for {m_slug}. Calculated sell amount ({shares_to_sell:.2f}) is less than 1.")
+
+                        market_fee = m_data.get('fee')
+                        if market_fee is None:
+                            log.warning(f"Could not find fee for Myriad market {m_slug} during SELL check. Skipping.")
                             continue
                         
                         m_prices = m_client.parse_realtime_prices(m_data)
@@ -323,25 +319,38 @@ def run_myriad_arb_check(pairs_to_check: list):
                              continue
                         
                         q1, q2, b = m_prices['shares1'], m_prices['shares2'], m_prices['liquidity']
+                        q_sell, q_other = (q1, q2) if paired_position['myr_outcome'] == 0 else (q2, q1)
                         
-                        myr_revenue = calculate_sell_revenue(q1, q2, b, shares_to_sell) if paired_position['myr_outcome'] == 0 else calculate_sell_revenue(q2, q1, b, shares_to_sell)
+                        # NEW: Find optimal sell amount
+                        optimal_s, max_profit, myr_rev_opt, poly_rev_opt = myriad_model.find_optimal_sell_amount(
+                            q_sell_initial=q_sell,
+                            q_other_initial=q_other,
+                            b=b,
+                            poly_bids_book=paired_position['poly_book'],
+                            max_shares_to_sell=min_shares,
+                            fee_rate=market_fee
+                        )
                         
-                        _f, poly_revenue, _p = consume_order_book(paired_position['poly_book'], shares_to_sell)
-                        total_revenue = myr_revenue + poly_revenue
-                        
-                        log.info(f"[SELL CHECK] Pair ({m_slug}, {p_id}): min_shares={min_shares:.2f}, shares_to_sell={shares_to_sell:.2f}, Myriad revenue=${myr_revenue:.2f}, Poly revenue=${poly_revenue:.2f}, Total=${total_revenue:.2f}")
-
-                        if total_revenue > (shares_to_sell * 1.015):
-                            log.warning(f"Found profitable early exit for {m_slug}! Total revenue for {shares_to_sell} shares is ${total_revenue:.2f}.")
-                            sell_opp = {
-                                "type": "sell", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                "market_identifiers": {"myriad_slug": m_slug, "myriad_market_id": myriad_market_id, "polymarket_condition_id": p_id, "polymarket_token_id_sell": paired_position['poly_token']},
-                                "market_details": {"myriad_title": m_data.get('title')},
-                                "trade_plan": {"myriad_outcome_id_sell": paired_position['myr_outcome'], "myriad_shares_to_sell": shares_to_sell, "myriad_min_usd_receive": myr_revenue * 0.99, "polymarket_shares_to_sell": shares_to_sell, "polymarket_limit_price": paired_position['poly_book'][0][0] if paired_position['poly_book'] else 0.01},
-                                "profitability_metrics": {"estimated_profit_usd": total_revenue - shares_to_sell},
-                                "amm_parameters": {"myriad_q1": q1, "myriad_q2": q2, "myriad_liquidity": b}
-                            }
-                            add_arb_opportunity(sell_opp)
+                        # Profit check: at least $1 profit AND at least 1.5% ROI
+                        if optimal_s > 0 and max_profit > 1.0:
+                            roi = max_profit / optimal_s if optimal_s > 0 else 0
+                            if roi > 0.015:
+                                log.warning(f"Found profitable early exit for {m_slug}! Optimal to sell {optimal_s:.2f} shares for a profit of ${max_profit:.2f} (ROI: {roi:.2%}).")
+                                sell_opp = {
+                                    "type": "sell", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                    "market_identifiers": {"myriad_slug": m_slug, "myriad_market_id": myriad_market_id, "polymarket_condition_id": p_id, "polymarket_token_id_sell": paired_position['poly_token']},
+                                    "market_details": {"myriad_title": m_data.get('title'), "market_fee": market_fee},
+                                    "trade_plan": {
+                                        "myriad_outcome_id_sell": paired_position['myr_outcome'], 
+                                        "myriad_shares_to_sell": optimal_s, 
+                                        "myriad_min_usd_receive": myr_rev_opt * 0.99, # 1% slippage buffer
+                                        "polymarket_shares_to_sell": optimal_s, 
+                                        "polymarket_limit_price": paired_position['poly_book'][0][0] if paired_position['poly_book'] else 0.01
+                                    },
+                                    "profitability_metrics": {"estimated_profit_usd": max_profit, "roi": roi},
+                                    "amm_parameters": {"myriad_q1": q1, "myriad_q2": q2, "myriad_liquidity": b}
+                                }
+                                add_arb_opportunity(sell_opp)
 
                 log.info(f"--- Checking Myriad Pair: Slug={m_slug}, Poly ID={p_id} ---")
                 

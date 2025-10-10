@@ -29,6 +29,75 @@ def calculate_sell_revenue(q1_initial: float, q2_initial: float, b: float, share
     revenue_pre_fee = initial_pool_cost - final_pool_cost
     return revenue_pre_fee * (1 - fee_rate)
 
+def find_optimal_sell_amount(
+    q_sell_initial: float, q_other_initial: float, b: float,
+    poly_bids_book: List[Tuple[float, int]],
+    max_shares_to_sell: float,
+    fee_rate: float = 0.0
+) -> Tuple[float, float, float, float]:
+    """
+    Finds the optimal number of shares to sell to maximize profit.
+    Uses a grid search approach.
+
+    Returns:
+        A tuple of (optimal_shares, max_profit, myriad_revenue_at_optimal, poly_revenue_at_optimal)
+    """
+    if max_shares_to_sell < 1.0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    best_profit = -1e9  # Initialize with a very small number
+    optimal_shares = 0.0
+    optimal_myr_rev = 0.0
+    optimal_poly_rev = 0.0
+
+    # Define search steps to efficiently scan the space
+    search_steps = []
+    # Fine-grained search for small quantities
+    search_steps.extend(range(1, min(int(max_shares_to_sell) + 1, 51)))
+    # Medium-grained search
+    if max_shares_to_sell > 50:
+        search_steps.extend(range(55, min(int(max_shares_to_sell) + 1, 201), 5))
+    # Coarse-grained search for large quantities
+    if max_shares_to_sell > 200:
+        search_steps.extend(range(220, int(max_shares_to_sell) + 1, 20))
+    # Always check the max amount, ensuring it's an integer for range-based steps
+    if int(max_shares_to_sell) not in search_steps:
+        search_steps.append(int(max_shares_to_sell))
+    
+    unique_sorted_steps = sorted(list(set(search_steps)))
+
+    if unique_sorted_steps:
+        log.info(f"Searching for optimal sell amount up to {max_shares_to_sell:.2f} shares across {len(unique_sorted_steps)} steps.")
+    else:
+        log.info(f"No search steps generated for max_shares_to_sell={max_shares_to_sell:.2f}. Bailing.")
+        return 0.0, 0.0, 0.0, 0.0
+
+
+    for shares_to_sell_int in unique_sorted_steps:
+        if shares_to_sell_int <= 0:
+            continue
+        
+        shares_to_sell = float(shares_to_sell_int)
+        myr_revenue = calculate_sell_revenue(q_sell_initial, q_other_initial, b, shares_to_sell, fee_rate)
+        # Polymarket book qty is integer
+        _, poly_revenue, _ = consume_order_book(poly_bids_book, shares_to_sell_int)
+        
+        total_revenue = myr_revenue + poly_revenue
+        profit = total_revenue - shares_to_sell
+        
+        if profit > best_profit:
+            best_profit = profit
+            optimal_shares = shares_to_sell
+            optimal_myr_rev = myr_revenue
+            optimal_poly_rev = poly_revenue
+
+    if best_profit > 0:
+        log.info(f"Optimal sell found: {optimal_shares:.2f} shares for a profit of ${best_profit:.2f} (MyrRev: ${optimal_myr_rev:.2f}, PolyRev: ${optimal_poly_rev:.2f})")
+    else:
+        log.info(f"No profitable sell opportunity found. Best option was a loss of ${-best_profit:.2f} at {optimal_shares:.2f} shares.")
+
+    return optimal_shares, best_profit, optimal_myr_rev, optimal_poly_rev
+
 def solve_shares_for_cost(
     q1_initial: float, q2_initial: float, b: float,
     max_cost: float, fee_rate: float,
