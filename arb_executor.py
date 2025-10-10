@@ -16,7 +16,7 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 # --- Local Project Imports ---
-from config import m_client, p_client, notifier, log, myriad_account
+from config import m_client, p_client, notifier, log, myriad_account, myriad_contract
 import streamlit_app.db as db
 import services.myriad.model as myriad_model
 from services.myriad.model import consume_order_book # Import for re-validation
@@ -235,6 +235,27 @@ def get_polymarket_positions() -> dict:
         log.error(f"[POLY] Failed to fetch Polymarket positions: {e}")
     return positions
 
+# <<< FIX: ADDED HELPER FUNCTION FOR MYRIAD BALANCE >>>
+def get_myriad_balance(market_id: int, outcome_id: int) -> float:
+    """Gets the on-chain Myriad share balance for a specific market and outcome."""
+    if not myriad_contract or not myriad_account:
+        log.warning("[MYRIAD] Myriad contract or account not initialized, cannot check balance.")
+        return 0.0
+    try:
+        log.info(f"[MYRIAD] Checking on-chain balance for market {market_id}, outcome {outcome_id}...")
+        _liquidity, outcomes = myriad_contract.functions.getUserMarketShares(market_id, myriad_account.address).call()
+        if outcome_id < len(outcomes):
+            # Myriad shares are scaled by 1e6
+            balance = outcomes[outcome_id] / 1e6
+            log.info(f"[MYRIAD] Found balance: {balance:.4f} shares.")
+            return balance
+        else:
+            log.error(f"[MYRIAD] Invalid outcome_id {outcome_id} for market {market_id}.")
+            return 0.0
+    except Exception as e:
+        log.error(f"[MYRIAD] Failed to get Myriad shares balance for market {market_id}: {e}")
+        return 0.0
+
 
 # --- POLYGON (POLYMARKET) FUNCTIONS ---
 w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
@@ -446,11 +467,12 @@ def process_sell_opportunity(opp: dict):
         if not m_data_live.get('state') == 'open' or not p_data_live.get('active'):
             raise ValueError("One of the markets is no longer active.")
 
-        # --- POSITION CHECK ---
+        # --- POSITION CHECK (Polymarket) ---
         log.info(f"[{trade_id}] Checking Polymarket position for condition ID {poly_id}...")
         all_poly_positions = get_polymarket_positions()
         market_positions = all_poly_positions.get(poly_id, {})
         
+        poly_token_id_sell = opp['market_identifiers']['polymarket_token_id_sell']
         outcome_name_to_sell = None
         if poly_token_id_sell == p_data_live.get('token_id_yes'):
             outcome_name_to_sell = p_data_live.get('outcome_yes')
@@ -465,6 +487,13 @@ def process_sell_opportunity(opp: dict):
         
         if current_balance < shares_to_sell:
             raise ValueError(f"Insufficient Polymarket balance. Have {current_balance:.4f}, need {shares_to_sell:.4f}.")
+
+        # <<< FIX: ADDED MYRIAD BALANCE CHECK >>>
+        myriad_market_id = opp['market_identifiers']['myriad_market_id']
+        myriad_outcome_id = opp['trade_plan']['myriad_outcome_id_sell']
+        myriad_balance = get_myriad_balance(myriad_market_id, myriad_outcome_id)
+        if myriad_balance < shares_to_sell:
+            raise ValueError(f"Insufficient Myriad balance. Have {myriad_balance:.4f}, need {shares_to_sell:.4f}.")
         
         log.info("✅ All Pre-flight checks for SELL passed.")
 
@@ -798,3 +827,4 @@ if __name__ == "__main__":
     db.init_db()
     main_loop()
 
+    

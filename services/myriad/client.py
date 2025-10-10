@@ -18,7 +18,8 @@ class MyriadClient:
         log.info("Fetching fresh Myriad markets from API.")
         url = f"{self.api_url}/markets?network_id=274133&state=open&land_ids=myriad-szn2-usdc-v33"
         try:
-            resp = requests.get(url, timeout=15)
+            # <<< FIX: Increased timeout from 15 to 25 >>>
+            resp = requests.get(url, timeout=100)
             resp.raise_for_status()
             markets_api = resp.json()
             
@@ -49,7 +50,8 @@ class MyriadClient:
         """Retrieve a single Myriad market by its slug, including its on-chain fee."""
         url = f"{self.api_url}/markets/{market_slug}"
         try:
-            resp = requests.get(url, timeout=10)
+            # <<< FIX: Increased timeout from 10 to 20 >>>
+            resp = requests.get(url, timeout=20)
             resp.raise_for_status()
             data = resp.json()
             
