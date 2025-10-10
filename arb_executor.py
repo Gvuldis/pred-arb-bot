@@ -29,7 +29,7 @@ from services.myriad.model import consume_order_book # Import for re-validation
 load_dotenv()
 
 # --- Trader Configuration ---
-EXECUTION_MODE = os.getenv("EXECUTION_MODE", "DRY_RUN")
+EXECUTION_MODE = "LIMITED_LIVE"
 LIMITED_LIVE_CAP_USD = float(os.getenv("LIMITED_LIVE_CAP_USD", "10.0"))
 MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "10.00"))
 MIN_ROI = float(os.getenv("MIN_ROI", "0.05"))
@@ -432,16 +432,13 @@ def process_sell_opportunity(opp: dict):
 
         # LEG 1: POLYMARKET SELL
         log.info(f"--- Executing Leg 1 (Polymarket SELL) ---")
-        existing_trade_ids = {t['id'] for t in clob_client.get_trades()} if EXECUTION_MODE != "DRY_RUN" else set()
+        existing_trade_ids = {t['id'] for t in clob_client.get_trades()}
         
-        if EXECUTION_MODE == "DRY_RUN":
-            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_sell']), 'makingAmount': str(plan['polymarket_shares_to_sell'] * plan['polymarket_limit_price'])}}
-        else:
-            poly_result = execute_polymarket_sell(
-                opp['market_identifiers']['polymarket_token_id_sell'],
-                plan['polymarket_limit_price'],
-                plan['polymarket_shares_to_sell']
-            )
+        poly_result = execute_polymarket_sell(
+            opp['market_identifiers']['polymarket_token_id_sell'],
+            plan['polymarket_limit_price'],
+            plan['polymarket_shares_to_sell']
+        )
         if not poly_result.get('success'):
             raise RuntimeError(f"Failed Leg 1 (Poly SELL): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")
 
@@ -451,11 +448,12 @@ def process_sell_opportunity(opp: dict):
         order_id = fak_response.get('orderID')
         status = fak_response.get('status')
 
-        if EXECUTION_MODE != "DRY_RUN" and status == 'matched':
+        if status == 'matched':
             log.info(f"[POLY] Sell Order {order_id} was matched instantly. Using details from FAK response.")
-            executed_poly_shares_sold = float(fak_response.get('takingAmount', '0'))
-            executed_poly_revenue_usd = float(fak_response.get('makingAmount', '0'))
-        elif EXECUTION_MODE != "DRY_RUN" and order_id:
+            # --- FIX: For a SELL order, makingAmount is shares and takingAmount is USDC received. ---
+            executed_poly_shares_sold = float(fak_response.get('makingAmount', '0'))
+            executed_poly_revenue_usd = float(fak_response.get('takingAmount', '0'))
+        elif order_id:
             log.info(f"[POLY] Sell Order {order_id} has status '{status}'. Polling for trade details...")
             all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
             db.save_poly_trades(all_my_trades_after)
@@ -470,11 +468,8 @@ def process_sell_opportunity(opp: dict):
                 trade_info_json = json.dumps(new_trades)
             else:
                 log.error(f"[POLY] CRITICAL: Could not find trade details for sell order {order_id} via polling.")
-        else: # DRY_RUN
-            executed_poly_shares_sold = float(fak_response.get('takingAmount', '0'))
-            executed_poly_revenue_usd = float(fak_response.get('makingAmount', '0'))
-            if executed_poly_revenue_usd == 0 and executed_poly_shares_sold > 0:
-                executed_poly_revenue_usd = executed_poly_shares_sold * plan['polymarket_limit_price']
+        else: # This case is unlikely but a good safeguard
+            log.error(f"[POLY] CRITICAL: FAK sell response was successful but had no orderID and was not 'matched'. Response: {fak_response}")
 
         if executed_poly_shares_sold <= 0:
             raise RuntimeError("Leg 1 (Poly SELL) executed, but no shares were sold.")
@@ -514,15 +509,12 @@ def process_sell_opportunity(opp: dict):
                 final_min_usdc_receive = recalculated_myr_revenue * 0.99
                 log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Recalculated minimum USDC receive: ${final_min_usdc_receive:.4f}")
 
-                if EXECUTION_MODE == "DRY_RUN":
-                    myriad_result = {'success': True, 'tx_hash': 'dry_run_hash_sell'}
-                else:
-                    myriad_result = execute_myriad_sell(
-                        opp['market_identifiers']['myriad_market_id'], 
-                        plan['myriad_outcome_id_sell'], 
-                        final_myriad_shares_to_sell, 
-                        final_min_usdc_receive
-                    )
+                myriad_result = execute_myriad_sell(
+                    opp['market_identifiers']['myriad_market_id'], 
+                    plan['myriad_outcome_id_sell'], 
+                    final_myriad_shares_to_sell, 
+                    final_min_usdc_receive
+                )
                 
                 if not myriad_result.get('success'):
                     # Raise an error to be caught by the outer except block for this attempt
@@ -549,7 +541,7 @@ def process_sell_opportunity(opp: dict):
         final_profit = (executed_poly_revenue_usd + recalculated_myr_revenue) - executed_poly_shares_sold
         trade_log.update({ 'status': 'SUCCESS_SELL', 'status_message': 'Both sell legs executed.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': final_profit })
         db.log_trade_attempt(trade_log)
-        if EXECUTION_MODE != "DRY_RUN" and notifier: notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], executed_poly_shares_sold, 0, 0, trade_type="SELL")
+        if notifier: notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], executed_poly_shares_sold, 0, 0, trade_type="SELL")
 
     except (ValueError, RuntimeError) as e:
         log.error(f"SELL trade failed for {trade_id}: {e}")
@@ -675,12 +667,9 @@ def process_opportunity(opp: dict):
         log.info("--- Executing Leg 1 (Polymarket) ---")
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
 
-        existing_trade_ids = {t['id'] for t in clob_client.get_trades()} if EXECUTION_MODE != "DRY_RUN" else set()
+        existing_trade_ids = {t['id'] for t in clob_client.get_trades()}
         
-        if EXECUTION_MODE == "DRY_RUN":
-            poly_result = {'success': True, 'response': {'success': True, 'takingAmount': str(plan['polymarket_shares_to_buy'])}}
-        else:
-            poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], plan['polymarket_limit_price'], plan['polymarket_shares_to_buy'])
+        poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], plan['polymarket_limit_price'], plan['polymarket_shares_to_buy'])
         
         if not poly_result.get('success'): raise RuntimeError(f"Failed Leg 1 (Poly): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")
         
@@ -690,14 +679,14 @@ def process_opportunity(opp: dict):
         order_id = fak_response.get('orderID')
         status = fak_response.get('status')
 
-        if EXECUTION_MODE != "DRY_RUN" and status == 'matched':
+        if status == 'matched':
             log.info(f"[POLY] Order {order_id} was matched instantly. Using details from FAK response.")
             executed_poly_shares = float(fak_response.get('takingAmount', '0'))
             executed_poly_cost_usd = float(fak_response.get('makingAmount', '0'))
             if executed_poly_cost_usd == 0 and executed_poly_shares > 0:
                 log.warning("[POLY] 'makingAmount' was zero for a matched order. Calculating cost from limit price.")
                 executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
-        elif EXECUTION_MODE != "DRY_RUN" and order_id:
+        elif order_id:
             log.info(f"[POLY] Order {order_id} has status '{status}'. Polling for trade details...")
             all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
             db.save_poly_trades(all_my_trades_after)
@@ -710,9 +699,8 @@ def process_opportunity(opp: dict):
                 trade_info_json = json.dumps(new_trades)
             else: 
                 log.error(f"[POLY] CRITICAL: Could not find trade details for order {order_id} via polling.")
-        else: # DRY_RUN case
-            executed_poly_shares = float(fak_response.get('takingAmount', '0'))
-            executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
+        else: # Unlikely case
+            log.error(f"[POLY] CRITICAL: FAK buy response was successful but had no orderID and was not 'matched'. Response: {fak_response}")
             
         if executed_poly_shares <= 0: raise RuntimeError("Leg 1 (Poly) executed but no shares acquired.")
         log.info(f"✅ Leg 1 SUCCESS: Acquired {executed_poly_shares:.4f} shares for ${executed_poly_cost_usd:.4f} on Polymarket.")
@@ -724,10 +712,7 @@ def process_opportunity(opp: dict):
         final_myriad_cost = (myriad_model.lmsr_cost(q1_f_final, q2_f_final, myriad_b) - initial_cost) * (1 + market_fee)
         if get_abstract_usdc_balance() < final_myriad_cost: raise RuntimeError(f"Insufficient capital for Leg 2.")
 
-        if EXECUTION_MODE == "DRY_RUN":
-            myriad_result = {'success': True, 'tx_hash': 'dry_run_hash'}
-        else:
-            myriad_result = execute_myriad_buy(opp['market_identifiers']['myriad_market_id'], plan['myriad_side_to_buy'] - 1, final_myriad_cost)
+        myriad_result = execute_myriad_buy(opp['market_identifiers']['myriad_market_id'], plan['myriad_side_to_buy'] - 1, final_myriad_cost)
         
         if not myriad_result.get('success'): raise RuntimeError(f"Failed Leg 2 (Myriad): {myriad_result.get('error')}")
 
@@ -737,10 +722,7 @@ def process_opportunity(opp: dict):
 
         threading.Thread(target=find_myriad_trade_details, args=(opp['market_identifiers']['myriad_market_id'], final_myriad_cost, myriad_account.address, trade_id, market_title)).start()
 
-        if EXECUTION_MODE != "DRY_RUN":
-            notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], executed_poly_shares, executed_poly_cost_usd, final_myriad_cost)
-        else:
-            notifier.notify_autotrade_dry_run(market_title, trade_log['final_profit_usd'])
+        notifier.notify_autotrade_success(market_title, trade_log['final_profit_usd'], executed_poly_shares, executed_poly_cost_usd, final_myriad_cost)
 
     except (ValueError, RuntimeError) as e:
         log.error(f"Trade failed for {trade_id}: {e}")
@@ -754,7 +736,7 @@ def process_opportunity(opp: dict):
             if status == 'FAIL_LEG2_EXECUTION' and trade_log.get('executed_poly_shares', 0) > 0:
                 log.critical(f"!!!!!! PANIC MODE TRIGGERED FOR {trade_id} !!!!!!")
                 if notifier: notifier.notify_autotrade_panic(market_title, str(e))
-                unwind_result = unwind_polymarket_position(opp['market_identifiers']['polymarket_token_id_buy'], trade_log['executed_poly_shares']) if EXECUTION_MODE != "DRY_RUN" else {'success': True}
+                unwind_result = unwind_polymarket_position(opp['market_identifiers']['polymarket_token_id_buy'], trade_log['executed_poly_shares'])
                 trade_log.update({'status': 'SUCCESS_RECONCILED' if unwind_result.get('success') else 'FAIL_RECONCILED'})
                 db.log_trade_attempt(trade_log)
         else:
