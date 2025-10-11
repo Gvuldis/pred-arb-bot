@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 import math
 import time
+import threading
 
 from config import b_client, m_client, p_client, fx_client, notifier, FEE_RATE_BODEGA, myriad_account, myriad_contract, POLYMARKET_PROXY_ADDRESS
 from jobs.fetch_new_bodega import fetch_and_notify_new_bodega
@@ -16,7 +17,8 @@ from streamlit_app.db import (
     save_polymarkets,
     load_probability_watches, delete_probability_watch,
     get_config_value, save_myriad_markets, load_myriad_markets,
-    add_arb_opportunity, get_market_cooldown, update_market_cooldown
+    add_arb_opportunity, get_market_cooldown, update_market_cooldown,
+    load_bodega_markets
 )
 from matching.fuzzy import fetch_all_polymarket_clob_markets
 from services.polymarket.model import build_arbitrage_table, infer_b
@@ -507,7 +509,8 @@ def setup_market_check_jobs(scheduler, platform: str):
         check_function = run_myriad_arb_check
     elif platform_lower == 'bodega':
         all_pairs = load_manual_pairs()
-        market_data = {m['id']: m for m in b_client.fetch_markets(force_refresh=True)}
+        # --- CHANGE: Use DB cache for speed, background job will update it ---
+        market_data = {m['id']: m for m in load_bodega_markets()}
         check_function = run_bodega_arb_check
     else:
         return
@@ -580,24 +583,35 @@ def reschedule_all_jobs(scheduler):
 if __name__ == "__main__":
     sched = BlockingScheduler(timezone="UTC")
 
-    log.info("Running initial jobs on startup...")
-    fetch_and_notify_new_bodega()
-    fetch_and_notify_new_myriad()
-    fetch_and_save_markets()
-    run_prob_watch_check()
-    prune_all_inactive_pairs()
-    log.info("Initial jobs complete.")
+    def run_initial_jobs():
+        """Runs the slow, blocking jobs in a background thread on startup."""
+        log.info("Running initial startup jobs in background thread...")
+        fetch_and_notify_new_bodega()
+        fetch_and_notify_new_myriad()
+        fetch_and_save_markets()
+        run_prob_watch_check()
+        prune_all_inactive_pairs()
+        log.info("Initial background jobs complete.")
 
+    # Start the slow jobs in a background thread so the scheduler can start immediately.
+    threading.Thread(target=run_initial_jobs, daemon=True).start()
+
+    # Schedule all recurring jobs
     sched.add_job(fetch_and_notify_new_bodega, "cron", minute="*/15")
     sched.add_job(fetch_and_notify_new_myriad, "cron", minute="*/15")
     sched.add_job(fetch_and_save_markets, "cron", minute="*/15")
     sched.add_job(prune_all_inactive_pairs, "cron", hour="*")
     sched.add_job(run_prob_watch_check, "interval", minutes=3, id="prob_watch_job")
     
+    # Schedule arb checks. This is now fast as it only reads from the DB.
+    # It will run once immediately to populate the scheduler with arb jobs.
     reschedule_all_jobs(sched)
+    
+    # Schedule the periodic reschedule to pick up changes from background/recurring jobs.
     sched.add_job(reschedule_all_jobs, "interval", minutes=5, args=[sched])
 
     log.info(f"Scheduler started with dynamic, two-tiered configuration.")
+    log.info("Arb checks starting immediately with cached data. A full data refresh is running in the background.")
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
