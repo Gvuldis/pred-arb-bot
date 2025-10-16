@@ -213,7 +213,7 @@ def run_bodega_arb_check(pairs_to_check: list):
                     
                     if summary.get("profit_usd", 0) > profit_threshold and \
                        summary.get("roi", 0) > 0.02 and \
-                       summary.get("apy", 0) >= 5:
+                       summary.get("apy", 0) >= 2:
                         summary['polymarket_side'] = poly_outcome_name_yes if summary['polymarket_side'] == 'YES' else poly_outcome_name_no
                         pair_desc = f"{pool['name']} <-> {p_data['question']}"
                         opportunities.append((pair_desc, summary, b_id, p_id))
@@ -336,7 +336,7 @@ def run_myriad_arb_check(pairs_to_check: list):
                         # Profit check: at least $1 profit AND at least 1.5% ROI
                         if optimal_s > 0 and max_profit > 1.0:
                             roi = max_profit / optimal_s if optimal_s > 0 else 0
-                            if roi > 0.015:
+                            if roi > 0.01:
                                 log.warning(f"Found profitable early exit for {m_slug}! Optimal to sell {optimal_s:.2f} shares for a profit of ${max_profit:.2f} (ROI: {roi:.2%}).")
                                 sell_opp = {
                                     "type": "sell", "opportunity_id": str(uuid.uuid4()), "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -418,7 +418,7 @@ def run_myriad_arb_check(pairs_to_check: list):
                     if is_flipped:
                         summary['polymarket_side'] = 2 if summary['polymarket_side'] == 1 else 1
 
-                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.05 and summary.get("apy", 0) >= 5:
+                    if summary.get("profit_usd", 0) > profit_threshold and summary.get("roi", 0) > 0.02 and summary.get("apy", 0) >= 2:
                         summary['myriad_current_price'] = m_prices['price1'] if summary['myriad_side'] == 1 else m_prices['price2']
                         summary['poly_current_price'] = (order_book_poly_1[0][0] if summary['polymarket_side'] == 1 and order_book_poly_1 else (order_book_poly_2[0][0] if summary['polymarket_side'] == 2 and order_book_poly_2 else None))
                         summary['myriad_side_title'] = m_prices['title1'] if summary['myriad_side'] == 1 else m_prices['title2']

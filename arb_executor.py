@@ -31,15 +31,15 @@ load_dotenv()
 # --- Trader Configuration ---
 EXECUTION_MODE = "LIMITED_LIVE"
 LIMITED_LIVE_CAP_USD = float(os.getenv("LIMITED_LIVE_CAP_USD", "10.0"))
-MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "10.00"))
-MIN_PROFIT_USD_SELL = float(os.getenv("MIN_PROFIT_USD_SELL", "5.00")) # Minimum profit to close a position
-MIN_ROI = float(os.getenv("MIN_ROI", "0.05"))
-MIN_APY = float(os.getenv("MIN_APY", "5"))
+MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", "5.00"))
+MIN_PROFIT_USD_SELL = float(os.getenv("MIN_PROFIT_USD_SELL", "1.00")) # Minimum profit to close a position
+MIN_ROI = float(os.getenv("MIN_ROI", "0.02"))
+MIN_APY = float(os.getenv("MIN_APY", "2"))
 
 # --- Safety Parameters ---
 MIN_ETH_BALANCE = 0.0003
 MARKET_EXPIRY_BUFFER_MINUTES = 10
-TRADE_COOLDOWN_MINUTES = 0.2
+TRADE_COOLDOWN_MINUTES = 0.1
 CAPITAL_SAFETY_BUFFER_USD = 5.0 # New safety buffer
 
 # --- On-Chain Configuration ---
