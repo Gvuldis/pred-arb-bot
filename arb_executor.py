@@ -27,7 +27,10 @@ from services.myriad.model import consume_order_book # Import for re-validation
 # ==============================================================================
 
 try:
-    from py_clob_client.http_helpers.helpers import overloadHeaders, ResponseError
+    # FIX: ResponseError was moved to its own `exceptions` module in a newer
+    # version of py-clob-client. We now import it from the correct location.
+    from py_clob_client.http_helpers.helpers import overloadHeaders
+    from py_clob_client.exceptions import ResponseError
     import py_clob_client.http_helpers.helpers
 
     def patched_request(endpoint: str, method: str, headers=None, data=None):
