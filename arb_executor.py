@@ -27,10 +27,9 @@ from services.myriad.model import consume_order_book # Import for re-validation
 # ==============================================================================
 
 try:
-    # FIX: ResponseError was moved to its own `exceptions` module in a newer
-    # version of py-clob-client. We now import it from the correct location.
+    # FINAL FIX: Remove dependency on the library's internal exceptions.
+    # We only need `overloadHeaders` and the `requests` library itself.
     from py_clob_client.http_helpers.helpers import overloadHeaders
-    from py_clob_client.exceptions import ResponseError
     import py_clob_client.http_helpers.helpers
 
     def patched_request(endpoint: str, method: str, headers=None, data=None):
@@ -40,9 +39,7 @@ try:
             compact_json_data = None
             if data is not None:
                 # The Polymarket API signature check is sensitive to whitespace.
-                # We must serialize the JSON payload into a compact string.
-                # `separators=(',', ':')` is the correct and safe way to do this,
-                # as it avoids removing spaces inside string values.
+                # We serialize the JSON payload into a compact string.
                 compact_json_data = json.dumps(data, separators=(',', ':'))
 
             resp = requests.request(
@@ -53,14 +50,19 @@ try:
                 data=compact_json_data
             )
             
-            # Re-implement the error handling from the original function
-            if resp.status_code != 200:
-                log.error(f"Polymarket API Error ({resp.status_code}): {resp.text}")
-                raise ResponseError(resp.text)
+            # This is the robust solution. It uses the standard `requests` library
+            # to check for HTTP errors (like 401, 500, etc.) and raises an
+            # exception if one occurs. This removes the need to guess the
+            # name of the exception class from py-clob-client.
+            resp.raise_for_status()
             
             return resp
+        except requests.exceptions.HTTPError as e:
+            # Specifically log the API error from the response and re-raise.
+            log.error(f"Polymarket API Error ({e.response.status_code}): {e.response.text}")
+            raise e
         except Exception as e:
-            # Let the original exception propagate
+            # Let any other exception (e.g., connection error) propagate.
             raise e
 
     # Apply the patch
@@ -68,6 +70,7 @@ try:
     log.info("Applied monkey-patch to py-clob-client for API authentication whitespace sensitivity.")
 
 except (ImportError, AttributeError) as e:
+    # This will now only fail if `overloadHeaders` is moved, which is less likely.
     log.error(f"Could not apply monkey-patch to py-clob-client: {e}")
 
 
