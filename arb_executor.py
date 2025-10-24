@@ -1,3 +1,4 @@
+# arb_executor.py
 import os
 import math
 import logging
@@ -20,6 +21,52 @@ from config import m_client, p_client, notifier, log, myriad_account, myriad_con
 import streamlit_app.db as db
 import services.myriad.model as myriad_model
 from services.myriad.model import consume_order_book # Import for re-validation
+
+# ==============================================================================
+# 0. MONKEY-PATCH FOR PY-CLOB-CLIENT AUTHENTICATION
+# ==============================================================================
+
+try:
+    from py_clob_client.http_helpers.helpers import overloadHeaders, ResponseError
+    import py_clob_client.http_helpers.helpers
+
+    def patched_request(endpoint: str, method: str, headers=None, data=None):
+        try:
+            headers = overloadHeaders(method, headers)
+            
+            compact_json_data = None
+            if data is not None:
+                # The Polymarket API signature check is sensitive to whitespace.
+                # We must serialize the JSON payload into a compact string.
+                # `separators=(',', ':')` is the correct and safe way to do this,
+                # as it avoids removing spaces inside string values.
+                compact_json_data = json.dumps(data, separators=(',', ':'))
+
+            resp = requests.request(
+                method=method,
+                url=endpoint,
+                headers=headers,
+                # Use `data` to send the pre-serialized string, not `json`
+                data=compact_json_data
+            )
+            
+            # Re-implement the error handling from the original function
+            if resp.status_code != 200:
+                log.error(f"Polymarket API Error ({resp.status_code}): {resp.text}")
+                raise ResponseError(resp.text)
+            
+            return resp
+        except Exception as e:
+            # Let the original exception propagate
+            raise e
+
+    # Apply the patch
+    py_clob_client.http_helpers.helpers.request = patched_request
+    log.info("Applied monkey-patch to py-clob-client for API authentication whitespace sensitivity.")
+
+except (ImportError, AttributeError) as e:
+    log.error(f"Could not apply monkey-patch to py-clob-client: {e}")
+
 
 # ==============================================================================
 # 1. CONFIGURATION AND SETUP
@@ -827,5 +874,3 @@ def main_loop():
 if __name__ == "__main__":
     db.init_db()
     main_loop()
-
-    
