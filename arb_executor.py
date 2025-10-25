@@ -1,4 +1,3 @@
-# arb_executor.py
 import os
 import math
 import logging
@@ -21,58 +20,6 @@ from config import m_client, p_client, notifier, log, myriad_account, myriad_con
 import streamlit_app.db as db
 import services.myriad.model as myriad_model
 from services.myriad.model import consume_order_book # Import for re-validation
-
-# ==============================================================================
-# 0. MONKEY-PATCH FOR PY-CLOB-CLIENT AUTHENTICATION
-# ==============================================================================
-
-try:
-    # FINAL FIX: Remove dependency on the library's internal exceptions.
-    # We only need `overloadHeaders` and the `requests` library itself.
-    from py_clob_client.http_helpers.helpers import overloadHeaders
-    import py_clob_client.http_helpers.helpers
-
-    def patched_request(endpoint: str, method: str, headers=None, data=None):
-        try:
-            headers = overloadHeaders(method, headers)
-            
-            compact_json_data = None
-            if data is not None:
-                # The Polymarket API signature check is sensitive to whitespace.
-                # We serialize the JSON payload into a compact string.
-                compact_json_data = json.dumps(data, separators=(',', ':'))
-
-            resp = requests.request(
-                method=method,
-                url=endpoint,
-                headers=headers,
-                # Use `data` to send the pre-serialized string, not `json`
-                data=compact_json_data
-            )
-            
-            # This is the robust solution. It uses the standard `requests` library
-            # to check for HTTP errors (like 401, 500, etc.) and raises an
-            # exception if one occurs. This removes the need to guess the
-            # name of the exception class from py-clob-client.
-            resp.raise_for_status()
-            
-            return resp
-        except requests.exceptions.HTTPError as e:
-            # Specifically log the API error from the response and re-raise.
-            log.error(f"Polymarket API Error ({e.response.status_code}): {e.response.text}")
-            raise e
-        except Exception as e:
-            # Let any other exception (e.g., connection error) propagate.
-            raise e
-
-    # Apply the patch
-    py_clob_client.http_helpers.helpers.request = patched_request
-    log.info("Applied monkey-patch to py-clob-client for API authentication whitespace sensitivity.")
-
-except (ImportError, AttributeError) as e:
-    # This will now only fail if `overloadHeaders` is moved, which is less likely.
-    log.error(f"Could not apply monkey-patch to py-clob-client: {e}")
-
 
 # ==============================================================================
 # 1. CONFIGURATION AND SETUP
@@ -463,18 +410,14 @@ def process_sell_opportunity(opp: dict):
     market_key = f"myriad_{myriad_slug}_sell" # Use a separate cooldown key for sells
 
     try:
-        # --- FINAL CONFIRMATION CHECK ---
+        # <<< START OF FIX: ADD FINAL CONFIRMATION CHECK FOR SELLS >>>
         log.info(f"[{trade_id}] Performing final confirmation check for SELL...")
         
         m_data_live = m_client.fetch_market_details(myriad_slug)
         p_data_live = p_client.fetch_market(poly_id)
         
         if not m_data_live or not p_data_live:
-            raise ValueError("Stale SELL opportunity: Could not fetch live data for re-validation.")
-
-        # <<< FIX: Check market status right after fetching data >>>
-        if m_data_live.get('state') != 'open' or not p_data_live.get('active'):
-            raise ValueError("Stale SELL opportunity: One of the markets is no longer active.")
+            raise ValueError("Could not fetch live data for SELL re-validation.")
 
         plan = opp['trade_plan']
         shares_to_sell = plan['polymarket_shares_to_sell']
@@ -483,7 +426,7 @@ def process_sell_opportunity(opp: dict):
         # Re-calculate Myriad revenue
         m_prices_live = m_client.parse_realtime_prices(m_data_live)
         if not m_prices_live:
-             raise ValueError("Stale SELL opportunity: Could not parse live Myriad prices for re-validation.")
+             raise ValueError("Could not parse live Myriad prices for SELL re-validation.")
         q1_live, q2_live, b_live = m_prices_live['shares1'], m_prices_live['shares2'], m_prices_live['liquidity']
         q_sell_live, q_other_live = (q1_live, q2_live) if plan['myriad_outcome_id_sell'] == 0 else (q2_live, q1_live)
         reval_myriad_revenue = myriad_model.calculate_sell_revenue(q_sell_live, q_other_live, b_live, shares_to_sell, market_fee)
@@ -497,7 +440,7 @@ def process_sell_opportunity(opp: dict):
             poly_bids_book_live = p_data_live.get('order_book_no_bids', [])
 
         if not poly_bids_book_live:
-             raise ValueError("Stale SELL opportunity: Could not get live Polymarket bids book for re-validation.")
+             raise ValueError("Could not get live Polymarket bids book for SELL re-validation.")
         
         _, reval_poly_revenue, _ = consume_order_book(poly_bids_book_live, shares_to_sell)
         
@@ -513,13 +456,17 @@ def process_sell_opportunity(opp: dict):
             return # Exit the function, do not trade
         
         log.info(f"[{trade_id}] ✅ Final confirmation for SELL passed. Proceeding with trade.")
-        
+        # <<< END OF FIX >>>
+
         # STEP 1: PRE-FLIGHT CHECKS
         log.info("--- Performing pre-flight checks for SELL ---")
         if get_abstract_eth_balance() < MIN_ETH_BALANCE: raise ValueError(f"Insufficient gas on Myriad for sell.")
         last_trade_ts = db.get_market_cooldown(market_key)
         if last_trade_ts and datetime.now(timezone.utc) < (datetime.fromisoformat(last_trade_ts) + timedelta(minutes=TRADE_COOLDOWN_MINUTES)): raise ValueError(f"Market is on sell cooldown.")
         
+        if not m_data_live.get('state') == 'open' or not p_data_live.get('active'):
+            raise ValueError("One of the markets is no longer active.")
+
         # --- POSITION CHECK (Polymarket) ---
         log.info(f"[{trade_id}] Checking Polymarket position for condition ID {poly_id}...")
         all_poly_positions = get_polymarket_positions()
@@ -527,7 +474,6 @@ def process_sell_opportunity(opp: dict):
         
         poly_token_id_sell = opp['market_identifiers']['polymarket_token_id_sell']
         outcome_name_to_sell = None
-        # Use the live data fetched during validation to map token IDs
         if poly_token_id_sell == p_data_live.get('token_id_yes'):
             outcome_name_to_sell = p_data_live.get('outcome_yes')
         elif poly_token_id_sell == p_data_live.get('token_id_no'):
@@ -542,7 +488,7 @@ def process_sell_opportunity(opp: dict):
         if current_balance < shares_to_sell:
             raise ValueError(f"Insufficient Polymarket balance. Have {current_balance:.4f}, need {shares_to_sell:.4f}.")
 
-        # --- POSITION CHECK (Myriad) ---
+        # <<< FIX: ADDED MYRIAD BALANCE CHECK >>>
         myriad_market_id = opp['market_identifiers']['myriad_market_id']
         myriad_outcome_id = opp['trade_plan']['myriad_outcome_id_sell']
         myriad_balance = get_myriad_balance(myriad_market_id, myriad_outcome_id)
@@ -880,3 +826,5 @@ def main_loop():
 if __name__ == "__main__":
     db.init_db()
     main_loop()
+
+    
