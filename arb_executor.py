@@ -171,50 +171,48 @@ def find_myriad_trade_details(market_id: int, expected_cost: float, myriad_addre
             f"Please manually verify the trade. Expected cost was ~${expected_cost:.2f}."
         )
 
-# --- CORRECTED POLLING HELPER ---
-def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, condition_id: str, existing_trade_ids: set, max_attempts: int = 20, sleep_interval: int = 1):
+# --- REVISED POLLING HELPER USING TIMESTAMP ---
+def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, condition_id: str, after_timestamp: int, max_attempts: int = 20, sleep_interval: int = 1):
     """
-    Polls the get_trades endpoint to find new trades for a given order ID.
-    The `market` filter is not supported by the API, so this function fetches a
-    limited number of recent trades and filters them locally.
+    Polls the get_trades endpoint efficiently using a timestamp to find new trades for a given order ID.
+    This is FAST because it filters trades by time, requesting a very small dataset.
     
     Args:
         clob_client: The instance of the ClobClient.
         order_id: The ID of the order to look for trades from.
         condition_id: The Polymarket market (condition ID) to filter trades for.
-        existing_trade_ids: A set of trade IDs that existed before this order.
+        after_timestamp: A Unix timestamp. The function will only look for trades that happened AFTER this time.
         max_attempts: The maximum number of times to poll.
         sleep_interval: The number of seconds to sleep between polls.
 
     Returns:
-        A tuple containing (list_of_recent_trades_for_market, new_trades_list).
+        A tuple containing (all_new_trades_for_market, our_order_trades_list).
     """
-    log.info(f"[POLY] Polling for trade details for order {order_id} on market {condition_id}...")
+    log.info(f"[POLY] Polling for trade details for order {order_id} on market {condition_id} (after timestamp {after_timestamp})...")
     for attempt in range(max_attempts):
-        # Fetch a limited number of recent trades across all markets.
-        all_recent_trades = clob_client.get_trades(limit=2000)
+        # By filtering by time, this call is now extremely fast and avoids timeouts.
+        recent_trades = clob_client.get_trades(after=after_timestamp)
         
-        # Filter down to just the trades for the market we care about.
-        all_market_trades = [t for t in all_recent_trades if t.get('market') == condition_id]
-
-        new_trades = [
-            t for t in all_market_trades 
-            if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id
+        # Filter these recent trades for our specific market and order ID
+        our_market_trades = [t for t in recent_trades if t.get('market') == condition_id]
+        our_order_trades = [
+            t for t in our_market_trades 
+            if t.get('taker_order_id') == order_id
         ]
         
-        if new_trades:
-            log.info(f"[POLY] Found {len(new_trades)} new trade(s) on attempt {attempt + 1}.")
+        if our_order_trades:
+            log.info(f"[POLY] Found {len(our_order_trades)} new trade(s) on attempt {attempt + 1}.")
             # We return all recent trades for this market so the DB can be updated.
-            return all_market_trades, new_trades
+            return our_market_trades, our_order_trades
         
         log.info(f"[POLY] Attempt {attempt + 1}/{max_attempts}: No new trades found yet. Waiting {sleep_interval}s...")
         time.sleep(sleep_interval)
     
     log.error(f"[POLY] Polling timed out. Could not find trade details for order {order_id} after {max_attempts} attempts.")
     # Return the latest list of market trades even on failure.
-    final_recent_trades = clob_client.get_trades(limit=2000)
-    all_market_trades_final = [t for t in final_recent_trades if t.get('market') == condition_id]
-    return all_market_trades_final, []
+    final_recent_trades = clob_client.get_trades(after=after_timestamp)
+    final_market_trades = [t for t in final_recent_trades if t.get('market') == condition_id]
+    return final_market_trades, []
 
 
 def get_polymarket_positions() -> dict:
@@ -518,10 +516,9 @@ def process_sell_opportunity(opp: dict):
 
         # LEG 1: POLYMARKET SELL
         log.info(f"--- Executing Leg 1 (Polymarket SELL) ---")
-        # FIX: The 'market' param is not supported. Use limit and filter manually.
-        all_recent_trades = clob_client.get_trades(limit=2000)
-        existing_trade_ids = {t['id'] for t in all_recent_trades if t.get('market') == poly_id}
-        
+        # --- NEW STRATEGY: Use a timestamp to find the trade ---
+        timestamp_before_trade = int(time.time()) - 5 # Use a 5-second buffer for clock skew
+
         poly_result = execute_polymarket_sell(
             poly_token_id_sell,
             plan['polymarket_limit_price'],
@@ -541,7 +538,8 @@ def process_sell_opportunity(opp: dict):
             executed_poly_shares_sold = float(fak_response.get('makingAmount', '0'))
             executed_poly_revenue_usd = float(fak_response.get('takingAmount', '0'))
         elif order_id:
-            all_market_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, poly_id, existing_trade_ids)
+            # Use the new polling helper with the timestamp
+            all_market_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, poly_id, timestamp_before_trade)
             db.save_poly_trades(all_market_trades_after)
             if new_trades:
                 log.info(f"[POLY] Found {len(new_trades)} new trade(s) for sell order {order_id} via polling.")
@@ -737,10 +735,9 @@ def process_opportunity(opp: dict):
         log.info("--- Executing Leg 1 (Polymarket) ---")
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
         
-        # FIX: The `market` param is not supported. Use limit and filter manually.
-        all_recent_trades = clob_client.get_trades(limit=2000)
-        existing_trade_ids = {t['id'] for t in all_recent_trades if t.get('market') == poly_id}
-        
+        # --- NEW STRATEGY: Use a timestamp to find the trade ---
+        timestamp_before_trade = int(time.time()) - 5 # Use a 5-second buffer for clock skew
+
         poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], plan['polymarket_limit_price'], plan['polymarket_shares_to_buy'])
         
         if not poly_result.get('success'): raise RuntimeError(f"Failed Leg 1 (Poly): {poly_result.get('error') or poly_result.get('response', {}).get('errorMsg')}")
@@ -759,8 +756,8 @@ def process_opportunity(opp: dict):
                 log.warning("[POLY] 'makingAmount' was zero for a matched order. Calculating cost from limit price.")
                 executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
         elif order_id:
-            # Use corrected polling helper function
-            all_market_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, poly_id, existing_trade_ids)
+            # Use the new polling helper with the timestamp
+            all_market_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, poly_id, timestamp_before_trade)
             db.save_poly_trades(all_market_trades_after)
             if new_trades:
                 log.info(f"[POLY] Found {len(new_trades)} new trade(s) for buy order {order_id} via polling.")
