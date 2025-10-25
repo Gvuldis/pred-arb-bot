@@ -171,47 +171,49 @@ def find_myriad_trade_details(market_id: int, expected_cost: float, myriad_addre
             f"Please manually verify the trade. Expected cost was ~${expected_cost:.2f}."
         )
 
-# --- NEW HELPER FUNCTION FOR EFFICIENT POLLING ---
-def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, existing_trade_ids: set, max_attempts: int = 20, sleep_interval: int = 1):
+# --- PROBLEM #1 FIX: EFFICIENT POLLING HELPER ---
+def poll_for_polymarket_trades(clob_client: ClobClient, order_id: str, condition_id: str, existing_trade_ids: set, max_attempts: int = 20, sleep_interval: int = 1):
     """
-    Polls the get_trades endpoint to find new trades for a given order ID.
+    Polls the get_trades endpoint efficiently to find new trades for a given order ID.
+    This is FAST because it filters trades by the specific market.
     
     Args:
         clob_client: The instance of the ClobClient.
         order_id: The ID of the order to look for trades from.
+        condition_id: The Polymarket market (condition ID) to filter trades for.
         existing_trade_ids: A set of trade IDs that existed before this order.
         max_attempts: The maximum number of times to poll.
         sleep_interval: The number of seconds to sleep between polls.
 
     Returns:
-        A tuple containing (all_trades_after_list, new_trades_list).
-        Returns (latest_list, []) if no new trades are found after all attempts.
+        A tuple containing (all_trades_for_market, new_trades_list).
     """
-    log.info(f"[POLY] Polling for trade details for order {order_id}...")
+    log.info(f"[POLY] Polling for trade details for order {order_id} on market {condition_id}...")
     for attempt in range(max_attempts):
-        all_my_trades_after = clob_client.get_trades()
+        # By filtering by market, this call is now extremely fast and avoids timeouts.
+        all_market_trades_after = clob_client.get_trades(market=condition_id)
+        
         new_trades = [
-            t for t in all_my_trades_after 
+            t for t in all_market_trades_after 
             if t['id'] not in existing_trade_ids and t.get('taker_order_id') == order_id
         ]
         
         if new_trades:
             log.info(f"[POLY] Found {len(new_trades)} new trade(s) on attempt {attempt + 1}.")
-            return all_my_trades_after, new_trades
+            # We return all trades for this market so the DB can be updated with any other stray trades.
+            return all_market_trades_after, new_trades
         
         log.info(f"[POLY] Attempt {attempt + 1}/{max_attempts}: No new trades found yet. Waiting {sleep_interval}s...")
         time.sleep(sleep_interval)
     
     log.error(f"[POLY] Polling timed out. Could not find trade details for order {order_id} after {max_attempts} attempts.")
-    return clob_client.get_trades(), []
+    # Return the latest list of market trades even on failure.
+    return clob_client.get_trades(market=condition_id), []
 
 
-# --- FIX: Function to get all polymarket positions ---
 def get_polymarket_positions() -> dict:
     """ 
     Fetches current Polymarket positions from the data API.
-    This is the correct method, as used in auto_matcher.py.
-    The ClobClient does not have a method like get_user_state() for balances.
     Returns a dictionary mapping conditionId -> {outcome_name: size}.
     """
     if not POLY_PROXY_ADDRESS:
@@ -235,7 +237,6 @@ def get_polymarket_positions() -> dict:
         log.error(f"[POLY] Failed to fetch Polymarket positions: {e}")
     return positions
 
-# <<< FIX: ADDED HELPER FUNCTION FOR MYRIAD BALANCE >>>
 def get_myriad_balance(market_id: int, outcome_id: int) -> float:
     """Gets the on-chain Myriad share balance for a specific market and outcome."""
     if not myriad_contract or not myriad_account:
@@ -253,7 +254,7 @@ def get_myriad_balance(market_id: int, outcome_id: int) -> float:
             log.error(f"[MYRIAD] Invalid outcome_id {outcome_id} for market {market_id}.")
             return 0.0
     except Exception as e:
-        log.error(f"[MYRIAD] Failed to get Myriad shares balance for market {market_id}: {e}")
+        log.error(f"Failed to get Myriad shares balance for market {market_id}: {e}")
         return 0.0
 
 
@@ -359,24 +360,28 @@ def execute_myriad_buy(market_id: int, outcome_id: int, usdc_amount: float) -> d
         log.error(f"[MYRIAD] Buy execution failed: {e}", exc_info=True)
         return {'success': False, 'error': str(e)}
 
-def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, min_usdc_receive: float) -> dict:
-    """Executes a sell order on Myriad."""
-    log.info(f"[MYRIAD] Executing SELL. Market: {market_id}, Outcome: {outcome_id}, Shares: {shares_to_sell:.4f}, Min USDC: {min_usdc_receive:.4f}")
+def execute_myriad_sell(market_id: int, outcome_id: int, shares_to_sell: float, target_usdc_receive: float) -> dict:
+    """
+    Executes a sell order on Myriad based on a TARGET USDC value, with a generous
+    slippage buffer on the number of shares to ensure execution.
+    """
+    # --- NEW CORRECT LOGIC based on user feedback and testing ---
+    max_shares_with_slippage = shares_to_sell * 1.30  # Allow 30% slippage buffer
+    log.info(f"[MYRIAD] Executing SELL. Market: {market_id}, Outcome: {outcome_id}, Target Shares: {shares_to_sell:.4f}")
+    log.info(f"           Target USDC Receive: {target_usdc_receive:.4f}, Max Shares to Use (with 30% slippage): {max_shares_with_slippage:.4f}")
+
     try:
         market_contract = w3_abs.eth.contract(address=Web3.to_checksum_address(MYRIAD_MARKET_ADDRESS), abi=MYRIAD_MARKET_ABI)
         
-        # <<< CHANGE: SLIPPAGE TOLERANCE INCREASED TO 5% as per user request >>>
-        shares_with_slippage = shares_to_sell * 1.05
-        
-        # Both shares and USDC are scaled by 1e6 on Myriad's contract
-        shares_wei = int(shares_with_slippage * (10**6))
-        usdc_wei = int(min_usdc_receive * (10**6))
+        # Convert to wei format (scaled by 1e6)
+        shares_wei = int(max_shares_with_slippage * 1e6)
+        usdc_wei = int(target_usdc_receive * 1e6)
 
-        log.info(f"[MYRIAD] Building sell transaction with shares_wei={shares_wei} (includes 5% slippage tolerance), usdc_wei={usdc_wei}")
+        log.info(f"[MYRIAD] Building sell transaction with value(target_usdc)={usdc_wei}, maxOutcomeSharesToSell={shares_wei}")
         nonce = w3_abs.eth.get_transaction_count(myriad_account.address)
         gas_price = w3_abs.eth.gas_price
         
-        # sell(marketId, outcomeId, minUsdcToReceive, maxSharesToSell)
+        # sell(marketId, outcomeId, value, maxOutcomeSharesToSell)
         sell_tx = market_contract.functions.sell(market_id, outcome_id, usdc_wei, shares_wei).build_transaction({
             'from': myriad_account.address, 
             'nonce': nonce, 
@@ -407,23 +412,37 @@ def process_sell_opportunity(opp: dict):
     log.info(f"Full sell opportunity details: {json.dumps(opp, indent=2)}")
 
     trade_log = {'trade_id': trade_id, 'attempt_timestamp_utc': datetime.now(timezone.utc).isoformat(), 'myriad_slug': myriad_slug, 'polymarket_condition_id': poly_id, 'log_details': opp}
-    market_key = f"myriad_{myriad_slug}_sell" # Use a separate cooldown key for sells
+    market_key = f"myriad_{myriad_slug}_sell"
 
     try:
-        # <<< START OF FIX: ADD FINAL CONFIRMATION CHECK FOR SELLS >>>
-        log.info(f"[{trade_id}] Performing final confirmation check for SELL...")
+        # Get current balances first to determine sell size
+        myriad_market_id = opp['market_identifiers']['myriad_market_id']
+        myriad_outcome_id = opp['trade_plan']['myriad_outcome_id_sell']
+        myriad_balance = get_myriad_balance(myriad_market_id, myriad_outcome_id)
+
+        # --- NEW DYNAMIC RISK MANAGEMENT ---
+        plan = opp['trade_plan']
+        original_plan_amount = plan['myriad_shares_to_sell']
+        fifty_pct_balance = myriad_balance * 0.5
         
+        shares_to_sell = min(original_plan_amount, fifty_pct_balance)
+        log.info(f"RISK MGMT: Capping sell amount. Original plan: {original_plan_amount:.4f}, 50% of balance: {fifty_pct_balance:.4f}. Executing with: {shares_to_sell:.4f}")
+
+        if shares_to_sell < 1.0: # Don't bother with tiny trades
+            raise ValueError(f"Calculated sell amount ({shares_to_sell:.4f}) is less than 1 share. Aborting.")
+        
+        plan['polymarket_shares_to_sell'] = shares_to_sell
+        plan['myriad_shares_to_sell'] = shares_to_sell
+        
+        log.info(f"[{trade_id}] Performing final confirmation check for SELL (with capped size)...")
         m_data_live = m_client.fetch_market_details(myriad_slug)
         p_data_live = p_client.fetch_market(poly_id)
         
         if not m_data_live or not p_data_live:
             raise ValueError("Could not fetch live data for SELL re-validation.")
 
-        plan = opp['trade_plan']
-        shares_to_sell = plan['polymarket_shares_to_sell']
         market_fee = opp['market_details']['market_fee']
         
-        # Re-calculate Myriad revenue
         m_prices_live = m_client.parse_realtime_prices(m_data_live)
         if not m_prices_live:
              raise ValueError("Could not parse live Myriad prices for SELL re-validation.")
@@ -431,7 +450,6 @@ def process_sell_opportunity(opp: dict):
         q_sell_live, q_other_live = (q1_live, q2_live) if plan['myriad_outcome_id_sell'] == 0 else (q2_live, q1_live)
         reval_myriad_revenue = myriad_model.calculate_sell_revenue(q_sell_live, q_other_live, b_live, shares_to_sell, market_fee)
 
-        # Re-calculate Polymarket revenue
         poly_token_id_sell = opp['market_identifiers']['polymarket_token_id_sell']
         poly_bids_book_live = []
         if poly_token_id_sell == p_data_live.get('token_id_yes'):
@@ -444,19 +462,16 @@ def process_sell_opportunity(opp: dict):
         
         _, reval_poly_revenue, _ = consume_order_book(poly_bids_book_live, shares_to_sell)
         
-        # Re-calculate final profit
         reval_total_revenue = reval_myriad_revenue + reval_poly_revenue
         reval_profit = reval_total_revenue - shares_to_sell
         
-        original_profit = opp['profitability_metrics']['estimated_profit_usd']
-        log.info(f"[{trade_id}] SELL Re-validation results: Profit=${reval_profit:.2f} (Original: ${original_profit:.2f})")
+        log.info(f"[{trade_id}] SELL Re-validation results: Profit=${reval_profit:.2f}")
 
         if reval_profit < MIN_PROFIT_USD_SELL:
             log.warning(f"[{trade_id}] Stale SELL opportunity. Profitability dropped below threshold of ${MIN_PROFIT_USD_SELL:.2f}. Discarding trade.")
-            return # Exit the function, do not trade
+            return
         
         log.info(f"[{trade_id}] ✅ Final confirmation for SELL passed. Proceeding with trade.")
-        # <<< END OF FIX >>>
 
         # STEP 1: PRE-FLIGHT CHECKS
         log.info("--- Performing pre-flight checks for SELL ---")
@@ -472,7 +487,6 @@ def process_sell_opportunity(opp: dict):
         all_poly_positions = get_polymarket_positions()
         market_positions = all_poly_positions.get(poly_id, {})
         
-        poly_token_id_sell = opp['market_identifiers']['polymarket_token_id_sell']
         outcome_name_to_sell = None
         if poly_token_id_sell == p_data_live.get('token_id_yes'):
             outcome_name_to_sell = p_data_live.get('outcome_yes')
@@ -482,16 +496,12 @@ def process_sell_opportunity(opp: dict):
         if not outcome_name_to_sell:
             raise ValueError(f"Could not map token ID {poly_token_id_sell} to an outcome for condition ID {poly_id}.")
             
-        current_balance = market_positions.get(outcome_name_to_sell, 0.0)
-        log.info(f"[{trade_id}] Plan is to sell {shares_to_sell:.4f} of '{outcome_name_to_sell}'. Current balance: {current_balance:.4f} shares.")
+        current_poly_balance = market_positions.get(outcome_name_to_sell, 0.0)
+        log.info(f"[{trade_id}] Plan is to sell {shares_to_sell:.4f} of '{outcome_name_to_sell}'. Current balance: {current_poly_balance:.4f} shares.")
         
-        if current_balance < shares_to_sell:
-            raise ValueError(f"Insufficient Polymarket balance. Have {current_balance:.4f}, need {shares_to_sell:.4f}.")
-
-        # <<< FIX: ADDED MYRIAD BALANCE CHECK >>>
-        myriad_market_id = opp['market_identifiers']['myriad_market_id']
-        myriad_outcome_id = opp['trade_plan']['myriad_outcome_id_sell']
-        myriad_balance = get_myriad_balance(myriad_market_id, myriad_outcome_id)
+        if current_poly_balance < shares_to_sell:
+            raise ValueError(f"Insufficient Polymarket balance. Have {current_poly_balance:.4f}, need {shares_to_sell:.4f}.")
+        # Myriad balance was already checked for sizing, this is a redundant but safe check
         if myriad_balance < shares_to_sell:
             raise ValueError(f"Insufficient Myriad balance. Have {myriad_balance:.4f}, need {shares_to_sell:.4f}.")
         
@@ -502,7 +512,7 @@ def process_sell_opportunity(opp: dict):
 
         # LEG 1: POLYMARKET SELL
         log.info(f"--- Executing Leg 1 (Polymarket SELL) ---")
-        existing_trade_ids = {t['id'] for t in clob_client.get_trades()}
+        existing_trade_ids = {t['id'] for t in clob_client.get_trades(market=poly_id)}
         
         poly_result = execute_polymarket_sell(
             poly_token_id_sell,
@@ -523,9 +533,8 @@ def process_sell_opportunity(opp: dict):
             executed_poly_shares_sold = float(fak_response.get('makingAmount', '0'))
             executed_poly_revenue_usd = float(fak_response.get('takingAmount', '0'))
         elif order_id:
-            log.info(f"[POLY] Sell Order {order_id} has status '{status}'. Polling for trade details...")
-            all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
-            db.save_poly_trades(all_my_trades_after)
+            all_market_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, poly_id, existing_trade_ids)
+            db.save_poly_trades(all_market_trades_after)
             if new_trades:
                 log.info(f"[POLY] Found {len(new_trades)} new trade(s) for sell order {order_id} via polling.")
                 for trade in new_trades:
@@ -550,11 +559,9 @@ def process_sell_opportunity(opp: dict):
         final_myriad_shares_to_sell = executed_poly_shares_sold
         myriad_result = None
 
-        max_retries = 3
+        max_retries = 5 # Increased retries
         for attempt in range(max_retries):
             try:
-                # We fetch live data again here to calculate the minimum receive amount,
-                # which is a required parameter for the Myriad contract call.
                 log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Fetching live market data for sell TX parameters...")
                 live_m_data_leg2 = m_client.fetch_market_details(myriad_slug)
                 if not live_m_data_leg2: raise RuntimeError("Failed to fetch live Myriad data for Leg 2.")
@@ -568,17 +575,16 @@ def process_sell_opportunity(opp: dict):
                 q1_leg2, q2_leg2, b_leg2 = live_m_prices_leg2['shares1'], live_m_prices_leg2['shares2'], live_m_prices_leg2['liquidity']
                 q_sell_leg2, q_other_leg2 = (q1_leg2, q2_leg2) if plan['myriad_outcome_id_sell'] == 0 else (q2_leg2, q1_leg2)
 
-                myr_revenue_for_tx = myriad_model.calculate_sell_revenue(
+                target_usdc_for_tx = myriad_model.calculate_sell_revenue(
                     q_sell_leg2, q_other_leg2, b_leg2, final_myriad_shares_to_sell, market_fee_leg2
                 )
-                final_min_usdc_receive = myr_revenue_for_tx * 0.99
-                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Calculated minimum USDC receive for TX: ${final_min_usdc_receive:.4f}")
+                log.info(f"[MYRIAD][Attempt {attempt + 1}/{max_retries}] Calculated TARGET USDC receive for TX: ${target_usdc_for_tx:.4f}")
 
                 myriad_result = execute_myriad_sell(
                     opp['market_identifiers']['myriad_market_id'], 
                     plan['myriad_outcome_id_sell'], 
                     final_myriad_shares_to_sell, 
-                    final_min_usdc_receive
+                    target_usdc_for_tx
                 )
                 
                 if not myriad_result.get('success'):
@@ -598,7 +604,6 @@ def process_sell_opportunity(opp: dict):
             raise RuntimeError("Failed Leg 2 (Myriad SELL): All retry attempts failed.")
 
         log.info("✅ Both SELL legs executed successfully!")
-        # Use the re-validated profit for the final log and notification
         trade_log.update({ 'status': 'SUCCESS_SELL', 'status_message': 'Both sell legs executed.', 'myriad_tx_hash': myriad_result.get('tx_hash'), 'final_profit_usd': reval_profit })
         db.log_trade_attempt(trade_log)
         if notifier: notifier.notify_autotrade_success(market_title, reval_profit, executed_poly_shares_sold, 0, 0, trade_type="SELL")
@@ -723,8 +728,9 @@ def process_opportunity(opp: dict):
         # STEP 2: LEG 1 EXECUTION (POLYMARKET)
         log.info("--- Executing Leg 1 (Polymarket) ---")
         db.update_market_cooldown(market_key, datetime.now(timezone.utc).isoformat())
-
-        existing_trade_ids = {t['id'] for t in clob_client.get_trades()}
+        
+        # --- PROBLEM #1 FIX: Filter get_trades by market to prevent timeout ---
+        existing_trade_ids = {t['id'] for t in clob_client.get_trades(market=poly_id)}
         
         poly_result = execute_polymarket_buy(opp['market_identifiers']['polymarket_token_id_buy'], plan['polymarket_limit_price'], plan['polymarket_shares_to_buy'])
         
@@ -744,9 +750,9 @@ def process_opportunity(opp: dict):
                 log.warning("[POLY] 'makingAmount' was zero for a matched order. Calculating cost from limit price.")
                 executed_poly_cost_usd = executed_poly_shares * plan['polymarket_limit_price']
         elif order_id:
-            log.info(f"[POLY] Order {order_id} has status '{status}'. Polling for trade details...")
-            all_my_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, existing_trade_ids)
-            db.save_poly_trades(all_my_trades_after)
+            # --- PROBLEM #1 FIX: Use efficient polling helper function ---
+            all_market_trades_after, new_trades = poll_for_polymarket_trades(clob_client, order_id, poly_id, existing_trade_ids)
+            db.save_poly_trades(all_market_trades_after)
             if new_trades:
                 log.info(f"[POLY] Found {len(new_trades)} new trade(s) for buy order {order_id} via polling.")
                 for trade in new_trades:

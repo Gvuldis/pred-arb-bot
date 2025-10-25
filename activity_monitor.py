@@ -1,4 +1,3 @@
-# activity_monitor.py
 import os
 import requests
 import time
@@ -19,9 +18,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 # How often to check the API, in seconds
 POLL_INTERVAL_SECONDS = 20
 
-# --- MEMORY LEAK FIX: Capped Recent Hashes ---
+# --- FIX: Capped Recent Hashes to Prevent Memory Leak ---
 # We will only store the last 2000 transaction hashes. This is more than enough
-# to prevent duplicate alerts from recent activity and completely stops memory growth.
+# to prevent duplicate alerts and stops memory from growing indefinitely.
 MAX_SEEN_HASHES = 2000
 
 # --- Initialization ---
@@ -40,7 +39,7 @@ def monitor_bodega_activity():
         return
 
     # A deque with a max length acts as a "rolling" set. When it's full,
-    # adding a new item automatically discards the oldest one. This is the fix.
+    # adding a new item automatically discards the oldest one. This fixes the memory leak.
     seen_tx_hashes = deque(maxlen=MAX_SEEN_HASHES)
 
     log.info(f"Starting Bodega activity monitor. Alerting on trades > {LARGE_TRADE_THRESHOLD_SHARES} shares.")
